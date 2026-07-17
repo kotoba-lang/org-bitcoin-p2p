@@ -1,0 +1,47 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  nbb-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: kotoba-lang/kotobase
+          # Same pin as deps.edn -- keep the two in lockstep.
+          ref: bbf57df9dde5c1869182012860129a598382e088
+          path: .deps/kotobase
+      - uses: actions/checkout@v4
+        with:
+          repository: kotoba-lang/sha256d
+          # Same pin as deps.edn -- keep the two in lockstep.
+          ref: 5fd4e64d0fc5a616b798edbca7327da33c78eb02
+          path: .deps/sha256d
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --global nbb
+      # Pure .cljc core (kotobase.bitcoin.protocol) -- real historical
+      # mainnet/testnet header fixtures, proof-of-work + chain-linkage
+      # validation, message framing.
+      - run: nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" bin/run_tests.cljs
+      # Deterministic real-socket demo (.cljs-only transport): a real
+      # node:net loopback connection against a local fake peer this repo
+      # controls -- handshake, ping/pong, getheaders/headers round-trip
+      # with real fixture headers, tampered-batch rejection, timeout
+      # behavior, tampered-checksum-message drop. See the file's own
+      # docstring for exactly what this proves and why it's in-process
+      # rather than a second spawned OS process.
+      - run: nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" test/kotobase/bitcoin/transport_demo.cljs
+      # BEST-EFFORT live testnet demo -- real internet, a real Bitcoin
+      # testnet full node, non-deterministic by nature (peer
+      # availability/timing this repo doesn't control, and CI runners
+      # sometimes restrict arbitrary outbound TCP ports). Never gates CI
+      # green/red; see the file's own docstring for exactly what a
+      # failure here does and does not mean.
+      - run: nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" test/kotobase/bitcoin/testnet_live_demo.cljs
+        continue-on-error: true

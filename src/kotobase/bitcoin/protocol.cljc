@@ -1,0 +1,570 @@
+(ns kotobase.bitcoin.protocol
+  "Pure `.cljc` Bitcoin P2P wire protocol: message framing (the 24-byte
+  header + payload for `version`/`verack`/`ping`/`pong`/`getheaders`/
+  `headers`), block-header structure decode/encode, and SPV-level
+  header-chain validation (proof-of-work target check + chain linkage).
+  No sockets here -- see `kotobase.bitcoin.transport` (`.cljs`-only,
+  `node:net`) for the real TCP connection this namespace's encode/decode
+  feeds. Digests are delegated to `sha256d.core`
+  (https://github.com/kotoba-lang/sha256d, a portable `.cljc` FIPS 180-4
+  SHA-256 / Bitcoin SHA-256d reference implementation already verified
+  against the real Bitcoin genesis block on both JVM and V8) -- this
+  namespace does not reimplement SHA-256.
+
+  PERMANENT SAFETY BOUNDARY (ADR-2607172600 in `com-junkawasaki/root`,
+  not a v0.1-vs-later phasing question): this library is a READ-ONLY
+  OBSERVER of public Bitcoin chain data. It never generates or stores
+  private keys, never constructs or signs a transaction, never
+  broadcasts/relays a transaction, never participates in mempool relay,
+  never mines, and never implements full Bitcoin Script/consensus
+  validation. What it DOES do is genuine SPV-level header validation:
+  `hash-meets-target?` (does a header's own hash actually satisfy the
+  difficulty target its `bits` field claims) and `validate-chain` (does
+  each header in a sequence actually link to the previous header's real
+  hash) -- real cryptographic verification of the header chain, not a
+  stub and not full-node consensus. No wallet functionality of any kind
+  exists in this repo.
+
+  Testnet3 is this library's default/primary target network
+  (`testnet-magic`) -- mainnet (`mainnet-magic`) is supported as an
+  explicit, opt-in configuration value, never a default, so any live-
+  network exercise of this code stays unambiguously in \"protocol
+  implementation\" territory (ADR-2607172600)."
+  (:require [clojure.string :as str]
+            [sha256d.core :as sha256d]))
+
+;; ---------------------------------------------------------------------------
+;; Network magic bytes (first 4 bytes of every message header)
+;; ---------------------------------------------------------------------------
+
+(def mainnet-magic
+  "Bitcoin mainnet magic bytes, on-wire order (0xD9B4BEF9 read little-endian)."
+  [0xf9 0xbe 0xb4 0xd9])
+
+(def testnet-magic
+  "Bitcoin testnet3 magic bytes, on-wire order (0x0709110B read little-endian).
+  THE DEFAULT/PRIMARY network for this library -- see namespace docstring."
+  [0x0b 0x11 0x09 0x07])
+
+(def regtest-magic
+  "Bitcoin regtest magic bytes, on-wire order (0xDAB5BFFA read little-endian).
+  Not exercised by this repo's own tests/demos (no regtest fixtures), but a
+  real, correct constant for a caller who configures a local regtest node."
+  [0xfa 0xbf 0xb5 0xda])
+
+;; ---------------------------------------------------------------------------
+;; Byte-level primitives -- little-endian ints, CompactSize varints,
+;; var_str, over plain vectors of byte-values (ints 0-255), same
+;; convention sha256d.core uses.
+;; ---------------------------------------------------------------------------
+
+(defn uint-le->bytes
+  "n-byte little-endian encoding of a non-negative integer `v`. Built from
+  `quot`/`mod` (arithmetic), deliberately NOT `unsigned-bit-shift-right`/
+  `bit-and` -- JS bitwise operators are 32-bit-only and silently mask any
+  shift count to its low 5 bits (`x >>> 40` behaves as `x >>> 8`), the
+  exact bug class sha256d.core's own u64be-bytes docstring documents
+  hitting and fixing; this function needs to shift by up to 56 bits for
+  an 8-byte uint64 field (services/timestamp/nonce), well past that
+  32-bit boundary, so it avoids bitwise ops entirely and stays correct on
+  both platforms by construction."
+  [v n]
+  (loop [v v i 0 acc []]
+    (if (= i n)
+      acc
+      (recur (quot v 256) (inc i) (conj acc (mod v 256))))))
+
+(defn bytes->uint-le
+  "Little-endian byte vector `bs` -> non-negative integer, built with
+  plain `*`/`+` (portable, no shift-past-31-bits hazard). Exact up to 53
+  bits (double-precision-exact on cljs) -- fine for every field this
+  protocol actually uses (message lengths, timestamps, block-header
+  fields well within that range; a uint64 nonce/services value that
+  happened to set high bits above 2^53 would lose precision, an accepted
+  limitation for the ping/pong/version nonces this repo generates and
+  compares byte-for-byte, not arithmetically)."
+  [bs]
+  (reduce (fn [acc b] (+ (* acc 256) b)) 0 (reverse bs)))
+
+(defn- to-uint32
+  "Two's-complement wrap of a signed 32-bit `v` into 0..0xffffffff, via
+  plain arithmetic (not `bit-and`, which on cljs performs ToInt32 on both
+  operands and would NOT produce the unsigned magnitude this function's
+  callers need)."
+  [v]
+  (if (neg? v) (+ v 0x100000000) v))
+
+(defn int32-le->bytes
+  "4-byte little-endian two's-complement encoding of signed 32-bit `v`."
+  [v]
+  (uint-le->bytes (to-uint32 v) 4))
+
+(defn bytes->int32-le
+  "4-byte little-endian vector -> signed 32-bit integer (two's complement)."
+  [bs]
+  (let [u (bytes->uint-le bs)]
+    (if (>= u 0x80000000) (- u 0x100000000) u)))
+
+(defn encode-varint
+  "Bitcoin CompactSize: <0xfd -> 1 byte; <=0xffff -> 0xfd + uint16 LE;
+  <=0xffffffff -> 0xfe + uint32 LE; else -> 0xff + uint64 LE."
+  [n]
+  (cond
+    (< n 0xfd)        [n]
+    (<= n 0xffff)      (into [0xfd] (uint-le->bytes n 2))
+    (<= n 0xffffffff)  (into [0xfe] (uint-le->bytes n 4))
+    :else              (into [0xff] (uint-le->bytes n 8))))
+
+(defn decode-varint
+  "[bs offset] -> [value new-offset]."
+  [bs offset]
+  (let [b0 (nth bs offset)]
+    (cond
+      (< b0 0xfd) [b0 (inc offset)]
+      (= b0 0xfd) [(bytes->uint-le (subvec bs (inc offset) (+ offset 3))) (+ offset 3)]
+      (= b0 0xfe) [(bytes->uint-le (subvec bs (inc offset) (+ offset 5))) (+ offset 5)]
+      :else       [(bytes->uint-le (subvec bs (inc offset) (+ offset 9))) (+ offset 9)])))
+
+(defn- hex-val [c]
+  (case c
+    \0 0 \1 1 \2 2 \3 3 \4 4 \5 5 \6 6 \7 7 \8 8 \9 9
+    (\a \A) 10 (\b \B) 11 (\c \C) 12 (\d \D) 13 (\e \E) 14 (\f \F) 15))
+
+(defn hex->bytes
+  "Lowercase or uppercase hex string -> byte vector. Portable counterpart
+  to sha256d.core/bytes->hex, built without host interop (no
+  Character/digit / parseInt) so it works identically on JVM clj and
+  cljs -- used by this repo's own real-header test fixtures and by
+  kotobase.bitcoin.transport for hex-configured checkpoint/locator hashes."
+  [s]
+  (vec (map (fn [[a b]] (+ (* 16 (hex-val a)) (hex-val b))) (partition 2 s))))
+
+(defn ascii-bytes
+  "ASCII/UTF-8 bytes of a string as a plain byte vector -- reuses
+  sha256d.core's already-portable str->bytes rather than reimplementing
+  a second string encoder."
+  [s]
+  (sha256d/str->bytes s))
+
+(defn bytes->str
+  "Byte vector -> string (UTF-8). Portable counterpart to ascii-bytes;
+  sha256d.core has no decode direction (it only ever produces hex), so
+  this namespace supplies its own -- needed for command names and the
+  version message's user-agent var_str."
+  [bs]
+  #?(:clj (String. (byte-array (map unchecked-byte bs)) "UTF-8")
+     :cljs (.decode (js/TextDecoder.) (js/Uint8Array.from (clj->js (vec bs))))))
+
+(defn encode-var-string [s]
+  (let [bs (ascii-bytes s)]
+    (into (encode-varint (count bs)) bs)))
+
+(defn decode-var-string
+  "[bs offset] -> [string new-offset]."
+  [bs offset]
+  (let [[len offset'] (decode-varint bs offset)
+        end (+ offset' len)]
+    [(bytes->str (subvec bs offset' end)) end]))
+
+;; ---------------------------------------------------------------------------
+;; Message header (24 bytes): magic(4) + command(12, NUL-padded ASCII) +
+;; length(4 LE uint32, payload length) + checksum(4, first 4 bytes of
+;; sha256d(payload))
+;; ---------------------------------------------------------------------------
+
+(def header-size 24)
+
+(defn command->bytes
+  "Command name -> 12-byte NUL-padded ASCII vector. Throws if `cmd` is
+  longer than 12 bytes (every command this repo sends/parses -- version,
+  verack, ping, pong, getheaders, headers -- fits well within that)."
+  [cmd]
+  (let [bs (ascii-bytes cmd)]
+    (when (> (count bs) 12)
+      (throw (ex-info "command name exceeds 12 bytes" {:command cmd})))
+    (into bs (repeat (- 12 (count bs)) 0))))
+
+(defn bytes->command
+  "12-byte NUL-padded ASCII vector -> trimmed command name string."
+  [bs]
+  (bytes->str (vec (take-while pos? bs))))
+
+(defn checksum
+  "First 4 bytes of sha256d(payload) -- the message-header checksum field."
+  [payload-bytes]
+  (vec (take 4 (sha256d/sha256d-bytes payload-bytes))))
+
+(defn encode-message
+  "magic (4-byte vector) + command (string) + payload (byte vector) ->
+  the full on-wire byte vector (24-byte header + payload)."
+  [magic command payload-bytes]
+  (into (into (into (into (vec magic) (command->bytes command))
+                     (uint-le->bytes (count payload-bytes) 4))
+              (checksum payload-bytes))
+        payload-bytes))
+
+(defn decode-message-header
+  "Exactly `header-size` (24) bytes -> {:magic :command :length :checksum}."
+  [bs]
+  {:pre [(= header-size (count bs))]}
+  {:magic    (vec (subvec bs 0 4))
+   :command  (bytes->command (subvec bs 4 16))
+   :length   (bytes->uint-le (subvec bs 16 20))
+   :checksum (vec (subvec bs 20 24))})
+
+(defn checksum-valid?
+  "true iff header's :checksum actually matches sha256d(payload-bytes) --
+  a message whose declared checksum doesn't match its own payload is
+  corrupt/tampered and must be rejected before being decoded further."
+  [header payload-bytes]
+  (= (:checksum header) (checksum payload-bytes)))
+
+;; ---------------------------------------------------------------------------
+;; net_addr (the no-timestamp variant used inside `version`'s addr_recv/
+;; addr_from -- the timestamped variant used by the `addr` message itself
+;; is out of scope, this repo never sends/parses `addr`)
+;; ---------------------------------------------------------------------------
+
+(defn- parse-int-str [s]
+  #?(:clj (Integer/parseInt s) :cljs (js/parseInt s 10)))
+
+(defn ipv4->mapped-bytes
+  "\"a.b.c.d\" -> the 16-byte IPv4-in-IPv6-mapped address Bitcoin's
+  net_addr uses on the wire (10 zero bytes + 0xffff + the 4 IPv4 octets)."
+  [dotted-quad]
+  (let [octets (mapv parse-int-str (str/split dotted-quad #"\."))]
+    (into (into (vec (repeat 10 0)) [0xff 0xff]) octets)))
+
+(defn mapped-bytes->ipv4
+  "16-byte net_addr IP field -> \"a.b.c.d\" when it's an IPv4-mapped
+  address (bytes 0-9 zero, bytes 10-11 0xff 0xff), else the raw 16 bytes
+  as a hex string (this repo never originates real IPv6 peers, so a
+  human-readable IPv6 formatter is out of scope -- callers needing that
+  can format the hex themselves)."
+  [bs]
+  (if (and (= (repeat 10 0) (take 10 bs)) (= [0xff 0xff] (subvec (vec bs) 10 12)))
+    (str/join "." (subvec (vec bs) 12 16))
+    (sha256d/bytes->hex bs)))
+
+(defn encode-net-addr
+  "{:services :ip :port} -> 26-byte net_addr (no timestamp field --
+  the shape `version`'s addr_recv/addr_from use)."
+  [{:keys [services ip port]}]
+  (into (into (uint-le->bytes (or services 0) 8) (ipv4->mapped-bytes (or ip "0.0.0.0")))
+        (uint-le->bytes (or port 0) 2)))
+
+(defn decode-net-addr
+  "[bs offset] -> [{:services :ip :port} new-offset] over a 26-byte
+  no-timestamp net_addr."
+  [bs offset]
+  (let [services (bytes->uint-le (subvec bs offset (+ offset 8)))
+        ip       (mapped-bytes->ipv4 (subvec bs (+ offset 8) (+ offset 24)))
+        port     (bytes->uint-le (subvec bs (+ offset 24) (+ offset 26)))]
+    [{:services services :ip ip :port port} (+ offset 26)]))
+
+;; ---------------------------------------------------------------------------
+;; version / verack
+;; ---------------------------------------------------------------------------
+
+(def protocol-version
+  "70015 -- the version this library claims (post-BIP-0037 relay field,
+  well above every feature this repo actually uses)."
+  70015)
+
+(defn encode-version-payload
+  "{:version :services :timestamp :recv-addr :from-addr :nonce
+  :user-agent :start-height :relay?} -> payload bytes for the `version`
+  message. Every key has a sane default except :timestamp/:nonce, which
+  the caller should supply (a real wall-clock time and a fresh random
+  nonce) -- see kotobase.bitcoin.transport, the actual seam with a clock
+  and a real RNG."
+  [{:keys [version services timestamp recv-addr from-addr nonce
+           user-agent start-height relay?]
+    :or {version protocol-version services 0 recv-addr {} from-addr {}
+         user-agent "/kotobase:bitcoin-p2p:0.1.0/" start-height 0 relay? false}}]
+  (-> (int32-le->bytes version)
+      (into (uint-le->bytes services 8))
+      (into (uint-le->bytes timestamp 8))
+      (into (encode-net-addr recv-addr))
+      (into (encode-net-addr from-addr))
+      (into (uint-le->bytes nonce 8))
+      (into (encode-var-string user-agent))
+      (into (int32-le->bytes start-height))
+      (conj (if relay? 1 0))))
+
+(defn decode-version-payload
+  "`version` payload bytes -> {:version :services :timestamp :recv-addr
+  :from-addr :nonce :user-agent :start-height :relay?}. :relay? defaults
+  to true when the byte is absent (pre-BIP-0037 peers, protocol version
+  < 70001) per BIP-0037's own compatibility rule."
+  [bs]
+  (let [version      (bytes->int32-le (subvec bs 0 4))
+        services     (bytes->uint-le (subvec bs 4 12))
+        timestamp    (bytes->uint-le (subvec bs 12 20))
+        [recv-addr o1] (decode-net-addr bs 20)
+        [from-addr o2] (decode-net-addr bs o1)
+        nonce        (bytes->uint-le (subvec bs o2 (+ o2 8)))
+        [user-agent o3] (decode-var-string bs (+ o2 8))
+        start-height (bytes->int32-le (subvec bs o3 (+ o3 4)))
+        o4 (+ o3 4)]
+    {:version version :services services :timestamp timestamp
+     :recv-addr recv-addr :from-addr from-addr :nonce nonce
+     :user-agent user-agent :start-height start-height
+     :relay? (if (> (count bs) o4) (not (zero? (nth bs o4))) true)}))
+
+(def verack-command "verack")
+(defn encode-verack-payload [] [])
+
+;; ---------------------------------------------------------------------------
+;; ping / pong -- payload is just an 8-byte nonce
+;; ---------------------------------------------------------------------------
+
+(defn encode-ping-payload [nonce] (uint-le->bytes nonce 8))
+(defn decode-ping-payload [bs] (bytes->uint-le bs))
+(def encode-pong-payload encode-ping-payload)
+(def decode-pong-payload decode-ping-payload)
+
+;; ---------------------------------------------------------------------------
+;; getheaders
+;; ---------------------------------------------------------------------------
+
+(defn encode-getheaders-payload
+  "{:version :locator-hashes :hash-stop} -> payload bytes. locator-hashes
+  is a seq of 32-byte vectors in NATURAL (internal, on-wire) byte order --
+  the same order decode-block-header's :hash is in, most-recent-first per
+  the P2P spec (a real client sends a sparse back-tracking list; this
+  repo's transport, since it only ever tracks one linear header chain,
+  sends just the current tip -- see kotobase.bitcoin.transport). hash-stop
+  defaults to 32 zero bytes (\"as many as possible\")."
+  [{:keys [version locator-hashes hash-stop]
+    :or {version protocol-version locator-hashes [] hash-stop (vec (repeat 32 0))}}]
+  (-> (uint-le->bytes version 4)
+      (into (encode-varint (count locator-hashes)))
+      (into (apply concat locator-hashes))
+      (into hash-stop)))
+
+(defn decode-getheaders-payload
+  [bs]
+  (let [version (bytes->uint-le (subvec bs 0 4))
+        [n offset] (decode-varint bs 4)
+        [locator-hashes offset']
+        (loop [i 0 offset offset acc []]
+          (if (= i n)
+            [acc offset]
+            (recur (inc i) (+ offset 32) (conj acc (vec (subvec bs offset (+ offset 32)))))))
+        hash-stop (vec (subvec bs offset' (+ offset' 32)))]
+    {:version version :locator-hashes locator-hashes :hash-stop hash-stop}))
+
+;; ---------------------------------------------------------------------------
+;; Block header structure (80 bytes) -- version(4 LE i32) +
+;; prev-block(32, natural order) + merkle-root(32, natural order) +
+;; timestamp(4 LE u32) + bits(4 LE u32) + nonce(4 LE u32)
+;; ---------------------------------------------------------------------------
+
+(def block-header-size 80)
+
+(defn encode-block-header
+  "{:version :prev-block :merkle-root :timestamp :bits :nonce} -> the
+  80-byte on-wire header (no computed fields consumed)."
+  [{:keys [version prev-block merkle-root timestamp bits nonce]}]
+  (-> (int32-le->bytes version)
+      (into prev-block)
+      (into merkle-root)
+      (into (uint-le->bytes timestamp 4))
+      (into (uint-le->bytes bits 4))
+      (into (uint-le->bytes nonce 4))))
+
+(defn block-hash
+  "sha256d of an 80-byte header, in NATURAL (internal, on-wire) byte
+  order -- this is the value another header's :prev-block field carries,
+  and the value hash-meets-target? compares against a target. NOT the
+  human-displayed order (see sha256d.core/bytes->hex-reversed / this
+  namespace's block-hash-hex for that)."
+  [header-bytes]
+  (vec (sha256d/sha256d-bytes header-bytes)))
+
+(defn block-hash-hex
+  "Conventional big-endian display hex of an 80-byte header's hash (the
+  form block explorers / RPC show) -- sha256d.core/bytes->hex-reversed
+  over block-hash's natural-order digest."
+  [header-bytes]
+  (sha256d/bytes->hex-reversed (block-hash header-bytes)))
+
+(defn decode-block-header
+  "Exactly 80 bytes -> {:version :prev-block :merkle-root :timestamp
+  :bits :nonce :hash :hash-hex :bytes}. :hash/:hash-hex are ALWAYS
+  computed from the actual bytes (sha256d), never trusted from any
+  external claim -- a caller cannot spoof a header's hash independent of
+  its real content, which is the load-bearing trustless property every
+  validation function below depends on."
+  [bs]
+  {:pre [(= block-header-size (count bs))]}
+  (let [bs (vec bs)]
+    {:version     (bytes->int32-le (subvec bs 0 4))
+     :prev-block  (vec (subvec bs 4 36))
+     :merkle-root (vec (subvec bs 36 68))
+     :timestamp   (bytes->uint-le (subvec bs 68 72))
+     :bits        (bytes->uint-le (subvec bs 72 76))
+     :nonce       (bytes->uint-le (subvec bs 76 80))
+     :hash        (block-hash bs)
+     :hash-hex    (block-hash-hex bs)
+     :bytes       bs}))
+
+;; ---------------------------------------------------------------------------
+;; headers message -- count(varint) + N * (80-byte header + txn_count
+;; varint, always 0 for a headers-only sync)
+;; ---------------------------------------------------------------------------
+
+(defn encode-headers-payload
+  "seq of decoded-header maps (as decode-block-header produces, or any
+  map with the same encode-block-header-consumable keys) -> payload
+  bytes. Always writes txn_count=0 per header (this repo never carries
+  transactions in a `headers` message, matching the real protocol's
+  headers-only usage)."
+  [headers]
+  (into (encode-varint (count headers))
+        (mapcat (fn [h] (into (encode-block-header h) (encode-varint 0))) headers)))
+
+(defn decode-headers-payload
+  "`headers` payload bytes -> seq of decoded headers (decode-block-header
+  shape). Consumes and discards each header's trailing txn_count varint
+  (always 0 in a real headers-only response; this repo does not carry
+  transactions here -- see the permanent scope boundary in the namespace
+  docstring)."
+  [bs]
+  (let [[n offset] (decode-varint bs 0)]
+    (loop [i 0 offset offset acc []]
+      (if (= i n)
+        acc
+        (let [header-bytes (subvec bs offset (+ offset block-header-size))
+              [_txn-count offset'] (decode-varint bs (+ offset block-header-size))]
+          (recur (inc i) offset' (conj acc (decode-block-header header-bytes))))))))
+
+;; ---------------------------------------------------------------------------
+;; SPV-level validation: proof-of-work target check + chain linkage.
+;; Deliberately NOT full consensus: no difficulty-retarget-schedule check,
+;; no timestamp-median rule, no checkpoint/genesis-identity check, no
+;; script/transaction validation of any kind -- see namespace docstring.
+;; ---------------------------------------------------------------------------
+
+(defn bits->target-bytes
+  "32-byte BIG-ENDIAN vector for the target a block's compact `bits`
+  (4-byte uint32, already reassembled from its LE wire bytes) claims.
+  Standard Bitcoin compact-target decoding: top byte is an exponent (the
+  target's byte-length), low 3 bytes are the mantissa;
+  target = mantissa * 256^(exponent-3). The 0x00800000 sign bit marks a
+  degenerate \"negative\" target real consensus rules always reject --
+  this returns 32 zero bytes for that case (an all-zero target no real
+  32-byte hash can ever be <=, so hash-meets-target? correctly always
+  fails it, without a separate error path). No arbitrary-precision
+  integer type is used anywhere in this namespace: representing the
+  target as a big-endian BYTE VECTOR and comparing lexicographically
+  (compare-be, below) is exact and fully portable (JVM clj + cljs) without
+  needing bigint."
+  [bits]
+  (let [exponent (bit-and (unsigned-bit-shift-right bits 24) 0xff)
+        mantissa (bit-and bits 0x007fffff)
+        negative? (not (zero? (bit-and bits 0x00800000)))
+        m-bytes [(bit-and (unsigned-bit-shift-right mantissa 16) 0xff)
+                 (bit-and (unsigned-bit-shift-right mantissa 8) 0xff)
+                 (bit-and mantissa 0xff)]]
+    (vec
+     (cond
+       (or negative? (zero? mantissa) (> exponent 32))
+       (repeat 32 0)
+
+       (>= exponent 3)
+       (concat (repeat (- 32 exponent) 0) m-bytes (repeat (- exponent 3) 0))
+
+       :else
+       (concat (repeat (- 32 exponent) 0) (take exponent m-bytes))))))
+
+(defn- compare-be
+  "Lexicographic compare of two equal-length big-endian byte vectors, as
+  unsigned integers: -1/0/1."
+  [a b]
+  (loop [i 0]
+    (if (= i (count a))
+      0
+      (let [ai (nth a i) bi (nth b i)]
+        (cond (< ai bi) -1 (> ai bi) 1 :else (recur (inc i)))))))
+
+(defn hash-meets-target?
+  "true iff a header's own hash (NATURAL byte order, as decode-block-
+  header's :hash / block-hash produces) numerically satisfies the target
+  its own :bits claims -- the actual Bitcoin proof-of-work check. Compares
+  by reversing the natural-order hash to big-endian and doing an unsigned
+  byte-vector comparison against bits->target-bytes (compare-be) -- no
+  bigint arithmetic needed, see bits->target-bytes's docstring."
+  [hash-natural-bytes bits]
+  (<= (compare-be (vec (reverse hash-natural-bytes)) (bits->target-bytes bits)) 0))
+
+(defn header-links-to?
+  "true iff decoded header `h`'s :prev-block field equals prev decoded
+  header `prev`'s actual computed :hash -- the chain-linkage half of SPV
+  trust. Both :prev-block and :hash are natural-byte-order 32-byte
+  vectors, directly comparable."
+  [h prev]
+  (= (:prev-block h) (:hash prev)))
+
+(defn validate-chain
+  "Validates a seq of DECODED headers (decode-block-header shape) in
+  chain order, oldest first: every header's own hash must satisfy its own
+  claimed :bits target (hash-meets-target?), and every header after the
+  first must link to the immediately preceding header's real computed
+  hash (header-links-to?). Returns {:valid? bool :errors [{:index :type
+  :header-hash-hex} ...]}. Deliberately does NOT check: genesis-block
+  identity, the difficulty-retarget schedule (a real header's :bits value
+  is trusted as claimed once its own hash satisfies it -- this repo does
+  not recompute what :bits \"should\" be from the last-2016-blocks
+  timestamps), timestamp-median-past rules, checkpoints, or anything
+  about transactions/Merkle-root content (this repo carries headers only)
+  -- see namespace docstring for the exhaustive, permanent exclusion of
+  full Bitcoin consensus/Script validation."
+  [headers]
+  (let [headers (vec headers)
+        errors
+        (vec
+         (mapcat
+          (fn [i h]
+            (cond-> []
+              (not (hash-meets-target? (:hash h) (:bits h)))
+              (conj {:index i :type :insufficient-work :header-hash-hex (:hash-hex h)})
+
+              (and (pos? i) (not (header-links-to? h (nth headers (dec i)))))
+              (conj {:index i :type :broken-linkage :header-hash-hex (:hash-hex h)})))
+          (range (count headers)) headers))]
+    {:valid? (empty? errors) :errors errors}))
+
+(defn valid-header-chain?
+  "Convenience boolean wrapper over validate-chain."
+  [headers]
+  (:valid? (validate-chain headers)))
+
+;; ---------------------------------------------------------------------------
+;; Genesis headers -- the ONE hardcoded trust anchor this SPV client
+;; bootstraps from (real, on-wire bytes, independently re-verified against
+;; blockstream.info's public block-explorer API and re-derived with
+;; `openssl dgst -sha256` chained twice in the session that wrote this
+;; file -- not copied from memory of \"the genesis hash\"). Every header
+;; after genesis is validated forward from here via hash-meets-target?/
+;; header-links-to? (validate-chain) -- this is the entire trusted input;
+;; nothing else is ever assumed. kotobase.bitcoin.transport uses these as
+;; the base of its locator/linkage check on a fresh store that has not
+;; yet synced any header of its own."
+;; ---------------------------------------------------------------------------
+
+(def mainnet-genesis-header-hex
+  "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")
+
+(def testnet-genesis-header-hex
+  "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff001d1aa4ae18")
+
+(def mainnet-genesis-header (decode-block-header (hex->bytes mainnet-genesis-header-hex)))
+(def testnet-genesis-header (decode-block-header (hex->bytes testnet-genesis-header-hex)))
+
+(defn genesis-header
+  "mainnet-genesis-header or testnet-genesis-header for `network`
+  (:mainnet | :testnet)."
+  [network]
+  (case network :mainnet mainnet-genesis-header :testnet testnet-genesis-header))
