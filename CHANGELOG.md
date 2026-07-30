@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1 — 2026-07-30
+
+- Decode the full unsigned 64-bit range on the JVM without signed-long
+  overflow, allowing interoperability with arbitrary peer version and ping
+  nonces.
+- Encode and decode `net_addr` ports in the protocol-mandated network byte
+  order instead of little-endian.
+
 ## 0.4.0 — 2026-07-30
 
 - Add Bitcoin Core v31.1 testnet4 and default signet proof-of-work parameters

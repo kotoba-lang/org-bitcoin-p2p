@@ -71,19 +71,19 @@
   (loop [v v i 0 acc []]
     (if (= i n)
       acc
-      (recur (quot v 256) (inc i) (conj acc (mod v 256))))))
+      (recur (quot v 256) (inc i) (conj acc (int (mod v 256)))))))
 
 (defn bytes->uint-le
   "Little-endian byte vector `bs` -> non-negative integer, built with
-  plain `*`/`+` (portable, no shift-past-31-bits hazard). Exact up to 53
-  bits (double-precision-exact on cljs) -- fine for every field this
-  protocol actually uses (message lengths, timestamps, block-header
-  fields well within that range; a uint64 nonce/services value that
-  happened to set high bits above 2^53 would lose precision, an accepted
-  limitation for the ping/pong/version nonces this repo generates and
-  compares byte-for-byte, not arithmetically)."
+  plain `*`/`+` (portable, no shift-past-31-bits hazard). The JVM starts
+  with an arbitrary-precision integer so every uint64 peer nonce and
+  services value is accepted without signed-long overflow. ClojureScript
+  remains exact through its Number safe-integer range; callers compare
+  opaque nonce payload bytes rather than relying on arithmetic there."
   [bs]
-  (reduce (fn [acc b] (+ (* acc 256) b)) 0 (reverse bs)))
+  (reduce (fn [acc b] (+ (* acc 256) b))
+          #?(:clj (if (> (count bs) 7) 0N 0) :cljs 0)
+          (reverse bs)))
 
 (defn- to-uint32
   "Two's-complement wrap of a signed 32-bit `v` into 0..0xffffffff, via
@@ -250,7 +250,7 @@
   the shape `version`'s addr_recv/addr_from use)."
   [{:keys [services ip port]}]
   (into (into (uint-le->bytes (or services 0) 8) (ipv4->mapped-bytes (or ip "0.0.0.0")))
-        (uint-le->bytes (or port 0) 2)))
+        (reverse (uint-le->bytes (or port 0) 2))))
 
 (defn decode-net-addr
   "[bs offset] -> [{:services :ip :port} new-offset] over a 26-byte
@@ -258,7 +258,8 @@
   [bs offset]
   (let [services (bytes->uint-le (subvec bs offset (+ offset 8)))
         ip       (mapped-bytes->ipv4 (subvec bs (+ offset 8) (+ offset 24)))
-        port     (bytes->uint-le (subvec bs (+ offset 24) (+ offset 26)))]
+        port     (bytes->uint-le
+                  (reverse (subvec bs (+ offset 24) (+ offset 26))))]
     [{:services services :ip ip :port port} (+ offset 26)]))
 
 ;; ---------------------------------------------------------------------------

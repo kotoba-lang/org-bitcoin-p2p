@@ -14,6 +14,12 @@
     (is (= n (proto/bytes->uint-le (proto/uint-le->bytes n bytelen)))
         (str "round-trip failed for " n))))
 
+#?(:clj
+   (deftest uint64-decode-does-not-overflow-a-signed-long
+     (doseq [n [9223372036854775808N 18446744073709551615N]]
+       (is (= n (proto/bytes->uint-le (proto/uint-le->bytes n 8)))
+           (str "uint64 round-trip failed for " n)))))
+
 (deftest int32-round-trips
   (doseq [v [0 1 -1 70015 -70015 2147483647 -2147483648 1231006505]]
     (is (= v (proto/bytes->int32-le (proto/int32-le->bytes v))))))
@@ -47,6 +53,8 @@
         enc (proto/encode-net-addr addr)
         [decoded offset] (proto/decode-net-addr enc 0)]
     (is (= 26 (count enc)))
+    (is (= [0x47 0x9d] (subvec enc 24 26))
+        "Bitcoin net_addr ports use network byte order")
     (is (= addr decoded))
     (is (= 26 offset))))
 
