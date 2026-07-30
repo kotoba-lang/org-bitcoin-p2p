@@ -195,10 +195,13 @@
 ;; Connection lifecycle
 ;; ---------------------------------------------------------------------------
 
-(def default-port {:mainnet 8333 :testnet 18333})
+(def default-port {:mainnet 8333 :testnet 18333 :regtest 18444})
 
 (defn- magic-for [network]
-  (case network :mainnet proto/mainnet-magic :testnet proto/testnet-magic))
+  (case network
+    :mainnet proto/mainnet-magic
+    :testnet proto/testnet-magic
+    :regtest proto/regtest-magic))
 
 (defn- send-message!
   [conn-atom command payload-bytes]

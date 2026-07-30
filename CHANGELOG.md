@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0 — 2026-07-30
+
+- Add Bitcoin Core-compatible regtest genesis, magic, port, proof limit, and
+  no-retarget header consensus for deterministic fork/reorg testing.
+
 ## 0.2.0 — 2026-07-30
 
 - Enforce mainnet and testnet3 expected difficulty, including bounded

@@ -649,7 +649,11 @@
              :allow-min-difficulty? false}
    :testnet {:pow-limit-bits 0x1d00ffff
              :target-timespan 1209600 :target-spacing 600
-             :allow-min-difficulty? true}})
+             :allow-min-difficulty? true}
+   :regtest {:pow-limit-bits 0x207fffff
+             :target-timespan 1209600 :target-spacing 600
+             :allow-min-difficulty? true
+             :no-retarget? true}})
 
 (declare hash-meets-target? header-links-to?)
 
@@ -683,6 +687,9 @@
         height (+ start-height index)
         previous (nth headers (dec index))]
     (cond
+      (:no-retarget? (network-parameters network))
+      (:bits previous)
+
       (zero? (mod height interval))
       (let [epoch-height (- height interval)
             epoch-index (- epoch-height start-height)]
@@ -855,11 +862,18 @@
 (def testnet-genesis-header-hex
   "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff001d1aa4ae18")
 
+(def regtest-genesis-header-hex
+  "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f2002000000")
+
 (def mainnet-genesis-header (decode-block-header (hex->bytes mainnet-genesis-header-hex)))
 (def testnet-genesis-header (decode-block-header (hex->bytes testnet-genesis-header-hex)))
+(def regtest-genesis-header (decode-block-header (hex->bytes regtest-genesis-header-hex)))
 
 (defn genesis-header
   "mainnet-genesis-header or testnet-genesis-header for `network`
-  (:mainnet | :testnet)."
+  (:mainnet | :testnet | :regtest)."
   [network]
-  (case network :mainnet mainnet-genesis-header :testnet testnet-genesis-header))
+  (case network
+    :mainnet mainnet-genesis-header
+    :testnet testnet-genesis-header
+    :regtest regtest-genesis-header))

@@ -142,7 +142,10 @@
   (is (= (first fx/mainnet-header-hash-hex) (:hash-hex proto/mainnet-genesis-header)))
   (is (= (first fx/testnet-header-hash-hex) (:hash-hex proto/testnet-genesis-header)))
   (is (= proto/mainnet-genesis-header (proto/genesis-header :mainnet)))
-  (is (= proto/testnet-genesis-header (proto/genesis-header :testnet))))
+  (is (= proto/testnet-genesis-header (proto/genesis-header :testnet)))
+  (is (= "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
+         (:hash-hex proto/regtest-genesis-header)))
+  (is (= proto/regtest-genesis-header (proto/genesis-header :regtest))))
 
 (deftest every-real-fixture-header-hash-matches-blockstream-and-encode-round-trips
   (doseq [[net headers expected-hashes]
@@ -318,6 +321,15 @@
               (:errors mainnet)))
     (is (some #(= :insufficient-difficulty-context (:type %))
               (:errors testnet)))))
+
+(deftest regtest-keeps-the-previous-target-without-retargeting
+  (let [headers [(synthetic-header 0 0x207fffff)
+                 (synthetic-header 600 0x207fffff)]
+        result
+        (proto/validate-header-consensus
+         headers {:network :regtest :start-height 2015
+                  :validate-from-index 1 :now 10000})]
+    (is (:valid? result) (pr-str (:errors result)))))
 
 ;; ---------------------------------------------------------------------------
 ;; headers message (multi-header payload) round-trip
