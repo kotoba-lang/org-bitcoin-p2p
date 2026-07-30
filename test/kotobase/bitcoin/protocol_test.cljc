@@ -181,6 +181,22 @@
     (is (= [0x00 0xff 0xff] (subvec target 3 6)))
     (is (= (vec (repeat 26 0)) (subvec target 6 32)))))
 
+(deftest compact-target-round-trips-canonical-bitcoin-examples
+  (is (= 0x01120000
+         (proto/target-bytes->bits
+          (proto/bits->target-bytes 0x01123456))))
+  (doseq [bits [0x02008000 0x05009234 0x04123456
+                0x1d00ffff 0x1b0404cb]]
+    (is (= bits
+           (proto/target-bytes->bits (proto/bits->target-bytes bits))))))
+
+(deftest chainwork-is-exact-and-selects-only-the-more-work-chain
+  (let [one-block (proto/header-work 0x1d00ffff)
+        two-blocks (proto/accumulate-chainwork [0x1d00ffff 0x1d00ffff])]
+    (is (= [1 0 1 0 1] (subvec one-block 27 32)))
+    (is (proto/better-chain? two-blocks one-block))
+    (is (not (proto/better-chain? one-block two-blocks)))))
+
 (deftest flipping-a-nonce-bit-genuinely-breaks-either-pow-or-linkage-or-both
   ;; Real tamper-evidence proof, not an assumption: mutate the genesis
   ;; header's nonce by one bit, re-decode, and confirm the RESULTING
@@ -235,6 +251,74 @@
     ;; tampered one's (different) hash -- broken-linkage at index 2.
     (is (some #(and (= 2 (:index %)) (= :broken-linkage (:type %))) (:errors result)))))
 
+(defn- synthetic-header [timestamp bits]
+  {:timestamp timestamp :bits bits
+   :hash (vec (repeat 32 0))
+   :hash-hex (apply str (repeat 64 "0"))
+   :prev-block (vec (repeat 32 0))})
+
+(deftest contextual-consensus-enforces-mainnet-retarget-schedule
+  (let [context
+        (mapv #(synthetic-header (* % 600) 0x1d00ffff)
+              (range 2017))
+        rejected
+        (proto/validate-header-consensus
+         context {:network :mainnet :start-height 0
+                  :validate-from-index 2016})
+        expected (->> (:errors rejected)
+                      (filter #(= :unexpected-difficulty (:type %)))
+                      first :expected)
+        corrected (assoc-in context [2016 :bits] expected)
+        accepted
+        (proto/validate-header-consensus
+         corrected {:network :mainnet :start-height 0
+                    :validate-from-index 2016})]
+    (is (= 0x1d00ffde expected))
+    (is (some #(= :unexpected-difficulty (:type %)) (:errors rejected)))
+    (is (:valid? accepted) (pr-str (:errors accepted)))))
+
+(deftest contextual-consensus-enforces-median-time-and-future-time
+  (let [headers
+        (vec
+         (concat (map #(synthetic-header % 0x1d00ffff) (range 11))
+                 [(synthetic-header 5 0x1d00ffff)
+                  (synthetic-header 20000 0x1d00ffff)]))
+        result
+        (proto/validate-header-consensus
+         headers {:network :mainnet :start-height 1
+                  :validate-from-index 11 :now 10000})]
+    (is (some #(= :time-too-old (:type %)) (:errors result)))
+    (is (some #(= :time-too-new (:type %)) (:errors result)))))
+
+(deftest testnet-minimum-difficulty-recovers-to-the-last-non-minimum-target
+  (let [harder 0x1c00ffff
+        headers [(synthetic-header 0 harder)
+                 (synthetic-header 1201 0x1d00ffff)
+                 (synthetic-header 1800 harder)]
+        result
+        (proto/validate-header-consensus
+         headers {:network :testnet :start-height 1
+                  :validate-from-index 1 :now 10000})]
+    (is (:valid? result) (pr-str (:errors result)))))
+
+(deftest contextual-difficulty-fails-closed-without-required-ancestors
+  (let [mainnet
+        (proto/validate-header-consensus
+         [(synthetic-header 0 0x1d00ffff)
+          (synthetic-header 600 0x1d00ffff)]
+         {:network :mainnet :start-height 2015
+          :validate-from-index 1 :now 10000})
+        testnet
+        (proto/validate-header-consensus
+         [(synthetic-header 0 0x1d00ffff)
+          (synthetic-header 600 0x1d00ffff)]
+         {:network :testnet :start-height 100
+          :validate-from-index 1 :now 10000})]
+    (is (some #(= :insufficient-difficulty-context (:type %))
+              (:errors mainnet)))
+    (is (some #(= :insufficient-difficulty-context (:type %))
+              (:errors testnet)))))
+
 ;; ---------------------------------------------------------------------------
 ;; headers message (multi-header payload) round-trip
 ;; ---------------------------------------------------------------------------
@@ -245,3 +329,13 @@
     (is (= (count fx/mainnet-headers) (count decoded)))
     (is (= (map :hash-hex fx/mainnet-headers) (map :hash-hex decoded)))
     (is (proto/valid-header-chain? decoded))))
+
+(deftest malformed-headers-messages-fail-closed
+  (let [one (proto/encode-headers-payload [(first fx/mainnet-headers)])]
+    (doseq [payload [(proto/encode-varint 2001)
+                     (assoc one (dec (count one)) 1)
+                     (conj one 0)
+                     (vec (butlast (butlast one)))]]
+      (is (thrown? #?(:clj clojure.lang.ExceptionInfo
+                      :cljs js/Error)
+                   (proto/decode-headers-payload payload))))))

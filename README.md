@@ -17,14 +17,13 @@ not a v0.1-vs-later phasing question.** This repo NEVER:
 - implements full Bitcoin Script/consensus validation
 
 There is no wallet functionality of any kind anywhere in this codebase.
-What this repo DOES do is genuine **SPV-level header validation**: verify
-a header's own hash actually meets the difficulty target its `bits` field
-claims, and verify each header in a chain actually links to the real,
-computed hash of the header before it. That is real cryptographic
-verification of the header chain (`kotobase.bitcoin.protocol/validate-chain`)
--- not a stub, and not full-node consensus validation. If a change to this
-repo would need key handling or transaction construction, it is out of
-scope, permanently.
+What this repo DOES do is genuine **headers-only consensus validation**:
+proof of work, network-required difficulty transitions, testnet3's
+minimum-difficulty recovery rule, median-time-past, future-time bounds,
+chain linkage, exact per-header work, and cumulative-chainwork comparison.
+That is stronger than trusting a peer's `bits`, but is still not full-block
+consensus validation. Key handling and transaction construction remain out
+of scope permanently.
 
 **Testnet3 is this library's default/primary network.** Mainnet is
 supported as an explicit, opt-in `:network :mainnet` configuration value,
@@ -47,7 +46,7 @@ Two layers, same split every repo in this project uses:
 
 | Layer | Namespace | Shape |
 |---|---|---|
-| Pure core | `kotobase.bitcoin.protocol` | `.cljc`, no sockets: wire framing, block-header decode/encode, SPV validation |
+| Pure core | `kotobase.bitcoin.protocol` | `.cljc`, no sockets: wire framing, block-header decode/encode, header consensus |
 | Transport | `kotobase.bitcoin.transport` | `.cljs`-only, `node:net`: the real TCP connection, handshake, ping/pong, getheaders/headers, `kotobase.store` persistence |
 
 ## `kotobase.bitcoin.protocol` (pure `.cljc`)
@@ -64,8 +63,11 @@ Two layers, same split every repo in this project uses:
   **byte-vector comparison** rather than arbitrary-precision integer
   arithmetic (fully portable JVM clj + cljs without a bigint dependency;
   see the function's own docstring for why this is exact).
-- `header-links-to?` / `validate-chain` -- real chain-linkage
-  verification.
+- `validate-header-consensus` checks linkage, target range, proof of work,
+  mainnet/testnet3 difficulty scheduling, the 2,016-block retarget with
+  bounded timespan, median-time-past, and the two-hour future bound.
+- `header-work`, `accumulate-chainwork`, and `better-chain?` implement exact
+  256-bit work accounting without floating-point fork choice.
 - Digests are delegated to
   [`kotoba-lang/sha256d`](https://github.com/kotoba-lang/sha256d) (a
   portable `.cljc` SHA-256/SHA-256d reference implementation already
@@ -77,9 +79,9 @@ Two layers, same split every repo in this project uses:
   `hash-meets-target?`/`header-links-to?`, real cryptographic
   verification, not an expanding set of trusted checkpoints.
 
-Deliberately NOT implemented (see the safety boundary above): full
-Script/consensus validation, difficulty-retarget-schedule recomputation,
-timestamp-median-past rules, transaction/mempool handling of any kind.
+Deliberately NOT implemented (see the safety boundary above): transaction
+and Merkle-root validation, Script/UTXO consensus, block download, mempool
+handling, peer discovery, or multi-peer fork orchestration.
 
 ### Real test fixtures
 
@@ -130,12 +132,15 @@ loaded by the JVM `clojure -M:test` compat suite, so it can never regress
 before resolving. `get-headers!` sends `getheaders` (locator = the
 store's current tip, or the network's hardcoded genesis header on a fresh
 store), and -- only if the whole reply batch passes
-`kotobase.bitcoin.protocol/validate-chain` against the real prior tip --
+`kotobase.bitcoin.protocol/validate-header-consensus` against up to one
+retarget interval of stored ancestor context --
 persists every header via `kotobase.store`'s `IStore` (`-put`/`-get`;
 collection `:kotobase.bitcoin/headers` keyed by hash-hex, a `"tip"` doc in
 `:kotobase.bitcoin/meta`, and an audit stream at
 `:kotobase.bitcoin/header-stream`). An invalid batch is rejected
-all-or-nothing -- nothing from it is ever persisted. `ping!` sends a real
+all-or-nothing -- nothing from it is ever persisted. Network magic, payload
+size, header count, zero transaction counts, truncation, and trailing data
+are checked before persistence. `ping!` sends a real
 `ping` and resolves once the matching `pong` arrives; inbound `ping` from
 the peer is always auto-answered with `pong` regardless.
 
@@ -161,9 +166,14 @@ tip: {:height 2000, :hash-hex "0000000005bdbddb59a3cd33b69db94fa67669c41d9d32751
 ```
 
 2000 real testnet headers, received over a real socket from a real
-Bitcoin Core node, validated (`validate-chain` against the hardcoded
+Bitcoin Core node, validated (the then-current `validate-chain` against the hardcoded
 testnet genesis header) and persisted -- genuine SPV trust exercised
 against a real chain, not fixture data.
+
+After the 0.2.0 consensus upgrade, two consecutive persisted batches were
+exercised across real-peer handoff. The second batch crossed height 2,016,
+so the real testnet3 retarget boundary was accepted by
+`validate-header-consensus`, not only by synthetic boundary fixtures.
 
 **Also observed, honestly**: on some runs against some peers, the version/
 verack handshake and ping/pong completed but the peer did not reply to
@@ -185,10 +195,11 @@ success.
 | Wire framing (message header + payload, checksum) | Unit tests, `protocol_test.cljc` -- including a checksum-tamper-rejection test | High |
 | Block-header decode/encode, hash computation | Against real historical mainnet + testnet3 header bytes (genesis + 3), independently re-derived, not copied from memory | High |
 | Proof-of-work target check, chain linkage | Real 4-header chains on both networks validate; real tamper/reorder/insufficient-work cases are rejected | High |
+| Difficulty, MTP, future-time, exact chainwork | Bitcoin Core-compatible compact/retarget cases plus boundary, testnet recovery, timestamp, and fork-choice tests on JVM and ClojureScript | High for covered header rules |
 | Handshake / ping-pong / getheaders-headers / checksum-tamper-drop / timeout, over a REAL socket | `transport_demo.cljs`, 10/10 checks, deterministic (local fake peer) | High |
 | Interop with a real Bitcoin Core testnet peer | `testnet_live_demo.cljs` -- succeeded during this repo's own development (transcript above); best-effort/non-deterministic by nature, not gating CI | High when it succeeds, honestly non-deterministic when a peer doesn't respond |
 | Interop with Bitcoin mainnet | **Not exercised.** Testnet is this library's default/primary target per the safety boundary above. | None |
-| Security review of the transport (DoS resistance, malformed-input fuzzing, resource exhaustion) | **Not done. Not claimed.** | None |
+| Systematic fuzzing and independent security audit | **Not done. Not claimed.** Size/count/truncation/network-magic checks are covered, but this is not an audit. | None |
 
 ## Develop / test
 
@@ -199,8 +210,8 @@ wasm` > `clojurewasm` > `ClojureScript` > `nbb` > (jvm/bb)):
 git clone https://github.com/kotoba-lang/kotobase .deps/kotobase
 git clone https://github.com/kotoba-lang/sha256d .deps/sha256d
 
-# Pure .cljc core (protocol_test.cljc) -- real header fixtures, PoW +
-# linkage validation, message framing.
+# Pure .cljc core -- real headers, PoW, difficulty/MTP, chainwork,
+# linkage, strict message decoding.
 nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" bin/run_tests.cljs
 
 # Deterministic real-socket demo (local fake peer, no live network needed)
@@ -220,6 +231,8 @@ cannot run on the JVM at all):
 
 ```bash
 clojure -M:test
+clojure -M:lint
+clojure -M:coverage
 ```
 
 ## License

@@ -5,6 +5,17 @@ on:
   pull_request:
 
 jobs:
+  jvm-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeLaGuardo/setup-clojure@13.2
+        with:
+          cli: latest
+      - run: clojure -M:test
+      - run: clojure -M:lint
+      - run: clojure -M:coverage
+
   nbb-tests:
     runs-on: ubuntu-latest
     steps:

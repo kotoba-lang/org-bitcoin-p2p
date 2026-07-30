@@ -31,7 +31,6 @@
   those commands are not implemented anywhere in this namespace. No
   private key ever exists in this code path."
   (:require ["node:net" :as net]
-            [promesa.core :as p]
             [kotobase.bitcoin.protocol :as proto]
             [kotobase.store :as store]))
 
@@ -60,22 +59,40 @@
   now available (checksum-verified -- a message whose checksum doesn't
   match its own payload is dropped and logged, never handed to
   on-message, since it cannot be trusted to decode correctly)."
-  [reader-state-atom chunk on-message log!]
+  [reader-state-atom chunk expected-magic on-message invalid! log!]
   (swap! reader-state-atom update :buf
          (fn [buf] (js/Buffer.concat #js [buf chunk])))
-  (loop []
-    (let [buf (:buf (deref reader-state-atom))]
-      (when (>= (.-length buf) proto/header-size)
-        (let [header (proto/decode-message-header (buf->bytes (.subarray buf 0 proto/header-size)))
-              total (+ proto/header-size (:length header))]
-          (when (>= (.-length buf) total)
-            (let [payload-buf (.subarray buf proto/header-size total)
-                  payload (buf->bytes payload-buf)]
-              (swap! reader-state-atom assoc :buf (.subarray buf total))
-              (if (proto/checksum-valid? header payload)
-                (on-message {:command (:command header) :payload payload})
-                (log! (str "DROPPED message with invalid checksum, command=" (:command header))))
-              (recur))))))))
+  (try
+    (loop []
+      (let [buf (:buf (deref reader-state-atom))]
+        (when (> (.-length buf)
+                 (+ proto/header-size proto/max-protocol-payload-bytes))
+          (throw (ex-info "Bitcoin peer exceeded the receive buffer limit."
+                          {:type :bitcoin/oversized-message})))
+        (when (>= (.-length buf) proto/header-size)
+          (let [header
+                (proto/decode-message-header
+                 (buf->bytes (.subarray buf 0 proto/header-size)))
+                _ (when-not (= expected-magic (:magic header))
+                    (throw (ex-info "Bitcoin peer used the wrong network magic."
+                                    {:type :bitcoin/network-mismatch})))
+                _ (when (> (:length header)
+                           proto/max-protocol-payload-bytes)
+                    (throw (ex-info "Bitcoin peer declared an oversized message."
+                                    {:type :bitcoin/oversized-message})))
+                total (+ proto/header-size (:length header))]
+            (when (>= (.-length buf) total)
+              (let [payload-buf (.subarray buf proto/header-size total)
+                    payload (buf->bytes payload-buf)]
+                (swap! reader-state-atom assoc :buf (.subarray buf total))
+                (if (proto/checksum-valid? header payload)
+                  (on-message {:command (:command header) :payload payload})
+                  (log! (str "DROPPED message with invalid checksum, command="
+                             (:command header))))
+                (recur)))))))
+    (catch :default error
+      (reset! reader-state-atom {:buf (js/Buffer.alloc 0)})
+      (invalid! error))))
 
 ;; ---------------------------------------------------------------------------
 ;; kotobase.store persistence -- collections + stream this transport uses
@@ -115,14 +132,53 @@
   tip by the caller) into store: one -put per header keyed by its
   :hash-hex, one audit event per header, and finally advance the \"tip\"
   doc to the last header in the batch. Returns the new tip map."
-  [store headers base-height]
-  (doseq [[i h] (map-indexed vector headers)]
-    (store/-put store headers-coll (:hash-hex h) h)
-    (audit! store {:op :header-synced :hash-hex (:hash-hex h)
-                    :height (+ base-height i 1) :bits (:bits h)}))
-  (let [new-tip {:height (+ base-height (count headers)) :hash-hex (:hash-hex (last headers))}]
-    (store/-put store meta-coll "tip" new-tip)
-    new-tip))
+  [store headers base-height initial-chainwork]
+  (let [states
+        (rest
+         (reductions
+          (fn [{:keys [chainwork work-cache]} h]
+            (let [bits (:bits h)
+                  work (or (get work-cache bits)
+                           (proto/header-work bits))]
+              {:header h
+               :chainwork (proto/add-chainwork chainwork work)
+               :work-cache (assoc work-cache bits work)}))
+          {:chainwork (or initial-chainwork proto/zero-chainwork)
+           :work-cache {}}
+          headers))]
+    (doseq [[i {:keys [header chainwork]}] (map-indexed vector states)]
+      (store/-put store headers-coll (:hash-hex header)
+                  (assoc header :height (+ base-height i 1)
+                         :chainwork chainwork))
+      (audit! store {:op :header-synced :hash-hex (:hash-hex header)
+                     :height (+ base-height i 1) :bits (:bits header)}))
+    (let [{:keys [header chainwork]} (last states)
+          new-tip {:height (+ base-height (count headers))
+                   :hash-hex (:hash-hex header)
+                   :chainwork chainwork}]
+      (store/-put store meta-coll "tip" new-tip)
+      new-tip)))
+
+(defn- consensus-context
+  "Return up to one retarget interval of chronological ancestors ending at
+  base-header. Stored headers are hash-addressed, so this also works with data
+  written before :height was embedded in each header."
+  [store network base-header base-height]
+  (loop [header base-header height base-height remaining 2017
+         newest-first []]
+    (let [next-acc (conj newest-first header)]
+      (if (or (zero? height) (= remaining 1))
+        (vec (reverse next-acc))
+        (let [previous-height (dec height)
+              previous
+              (if (zero? previous-height)
+                (proto/genesis-header network)
+                (stored-header store
+                               (proto/natural-hash->hex
+                                (:prev-block header))))]
+          (if previous
+            (recur previous previous-height (dec remaining) next-acc)
+            (vec (reverse next-acc))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; nonces -- random, kept well within JS's exact-integer range (2^53);
@@ -208,7 +264,7 @@
   timeout. Returns a Promise<conn-atom>."
   [{:keys [host port network store user-agent start-height handshake-timeout-ms on-log]
     :or {network :testnet start-height 0 handshake-timeout-ms 10000
-         user-agent "/kotobase:bitcoin-p2p:0.1.0/"
+         user-agent "/kotobase:bitcoin-p2p:0.2.0/"
          on-log (fn [line] (println line))}}]
   (let [port (or port (get default-port network))
         magic (magic-for network)
@@ -250,10 +306,15 @@
                                   :start-height start-height :relay? false}))))
          (.on socket "data"
               (fn [chunk]
-                (feed! reader chunk
+                (feed! reader chunk magic
                        (fn [m]
                          (handle-message! conn-atom m)
                          (maybe-settle!))
+                       (fn [error]
+                         (log! (str "DISCONNECT invalid peer message: "
+                                    (or (some-> error ex-data :type)
+                                        (.-message error))))
+                         (.destroy socket))
                        log!)))
          (.on socket "error"
               (fn [err]
@@ -318,7 +379,11 @@
                       (stored-header store (:hash-hex prior-tip))
                       (proto/genesis-header network))
         base-height (or (:height prior-tip) 0)
-        locator [(:hash base-header)]]
+        locator [(:hash base-header)]
+        base-chainwork
+        (if prior-tip
+          (:chainwork prior-tip)
+          (proto/header-work (:bits base-header)))]
     (js/Promise.
      (fn [resolve _reject]
        (let [settled? (atom false)
@@ -337,14 +402,37 @@
                               :errors []})
 
                     :else
-                    (let [result (proto/validate-chain (cons base-header headers))]
+                    (let [context (consensus-context store network
+                                                     base-header base-height)
+                          all-headers (into context headers)
+                          context-start-height
+                          (- base-height (dec (count context)))
+                          result
+                          (proto/validate-header-consensus
+                           all-headers
+                           {:network network
+                            :start-height context-start-height
+                            :validate-from-index (count context)
+                            :now (quot (js/Date.now) 1000)})]
                       (if (:valid? result)
                         (if store
-                          (let [new-tip (persist-headers! store headers base-height)]
-                            (finish! {:ok? true :count (count headers) :tip new-tip :errors []}))
+                          (if base-chainwork
+                            (let [new-tip
+                                  (persist-headers!
+                                   store headers base-height base-chainwork)]
+                              (finish! {:ok? true :count (count headers)
+                                        :tip new-tip :errors []}))
+                            (finish!
+                             {:ok? false :count (count headers) :tip prior-tip
+                              :errors [{:type
+                                        :chainwork-migration-required}]}))
                           (finish! {:ok? true :count (count headers)
                                     :tip {:height (+ base-height (count headers))
-                                          :hash-hex (:hash-hex (last headers))}
+                                          :hash-hex (:hash-hex (last headers))
+                                          :chainwork
+                                          (proto/accumulate-chainwork
+                                           base-chainwork
+                                           (map :bits headers))}
                                     :errors []}))
                         (finish! {:ok? false :count (count headers) :tip prior-tip
                                   :errors (:errors result)}))))))

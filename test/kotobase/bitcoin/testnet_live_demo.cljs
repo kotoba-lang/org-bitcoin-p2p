@@ -65,7 +65,7 @@
               _ (println "  [ok] real TCP connect + version/verack handshake completed")
               pong-ok? (tp/ping! conn :timeout-ms 5000)
               _ (println "  ping! -> pong received?" pong-ok?)
-              result (tp/get-headers! conn :timeout-ms 12000)]
+              result (tp/get-headers! conn :timeout-ms 20000)]
         (println "  getheaders -> headers result: ok?" (:ok? result)
                   "count" (:count result) "errors" (pr-str (:errors result)))
         (when (:ok? result)
@@ -76,7 +76,7 @@
                       " timestamp=" (:timestamp h) " bits=" (:bits h) " nonce=" (:nonce h)
                       " prev-block links correctly? (validated by get-headers! before persisting)")))
         (tp/close! conn)
-        (:ok? result))
+        (and (:ok? result) (>= (:height (tp/tip store)) 2016)))
       (.catch (fn [e]
                 (println "  [fail] " (or (.-message e) e))
                 false))))
@@ -84,8 +84,8 @@
 ;; Known-previously-reachable testnet full nodes, found via a real
 ;; `dns.resolve4 seed.tbtc.petertodd.org` lookup during this repo's own
 ;; development and manually confirmed reachable + protocol-responsive at
-;; that time (real IPs, not fabricated) -- appended as a fallback AFTER
-;; a fresh DNS resolution, since this environment's outbound TCP reaches
+;; that time (real IPs, not fabricated) -- tried before a fresh DNS
+;; resolution, since this environment's outbound TCP reaches
 ;; only some of any given seed lookup's IPs (this sandbox's own egress,
 ;; not a defect in this client) and DNS-seed resolution order is
 ;; randomized per query, so a fixed seed alone is not reliably enough on
@@ -102,7 +102,8 @@
 (-> (p/let [seed-ips (resolve4 "seed.tbtc.petertodd.org")
             _ (println "resolved" (count seed-ips) "testnet DNS seed IPs")
             store (local/local-store)
-            ok? (try-peers (concat (take 6 seed-ips) known-fallback-testnet-peers) store)]
+            ok? (try-peers (concat known-fallback-testnet-peers
+                                   (take 6 seed-ips)) store)]
       (println (str "\nRESULT: " (if ok?
                                     "real testnet handshake + ping/pong + getheaders/headers sync + validation + persistence all succeeded against a real peer"
                                     "no real peer completed the full chain within this run -- see per-peer output above for exactly where each attempt stopped (honest network-timing/reachability limitation, not a silent failure)")))

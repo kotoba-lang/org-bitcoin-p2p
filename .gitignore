@@ -5,3 +5,4 @@ node_modules/
 target/
 out/
 .cljs_node_repl/
+.clj-kondo/.cache/

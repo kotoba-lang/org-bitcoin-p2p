@@ -1,8 +1,9 @@
 (ns kotobase.bitcoin.protocol
   "Pure `.cljc` Bitcoin P2P wire protocol: message framing (the 24-byte
   header + payload for `version`/`verack`/`ping`/`pong`/`getheaders`/
-  `headers`), block-header structure decode/encode, and SPV-level
-  header-chain validation (proof-of-work target check + chain linkage).
+  `headers`), block-header structure decode/encode, and headers-only
+  consensus validation (proof of work, expected difficulty,
+  median-time-past, cumulative chainwork, and chain linkage).
   No sockets here -- see `kotobase.bitcoin.transport` (`.cljs`-only,
   `node:net`) for the real TCP connection this namespace's encode/decode
   feeds. Digests are delegated to `sha256d.core`
@@ -17,13 +18,11 @@
   private keys, never constructs or signs a transaction, never
   broadcasts/relays a transaction, never participates in mempool relay,
   never mines, and never implements full Bitcoin Script/consensus
-  validation. What it DOES do is genuine SPV-level header validation:
-  `hash-meets-target?` (does a header's own hash actually satisfy the
-  difficulty target its `bits` field claims) and `validate-chain` (does
-  each header in a sequence actually link to the previous header's real
-  hash) -- real cryptographic verification of the header chain, not a
-  stub and not full-node consensus. No wallet functionality of any kind
-  exists in this repo.
+  validation. `validate-header-consensus` verifies a header's claimed
+  work, the network-required difficulty transition, median-time-past,
+  future-time bound, linkage, and exact cumulative chainwork. This is
+  real headers-only consensus verification, not full block/transaction/
+  Script validation. No wallet functionality of any kind exists here.
 
   Testnet3 is this library's default/primary target network
   (`testnet-magic`) -- mainnet (`mainnet-magic`) is supported as an
@@ -362,6 +361,8 @@
 ;; ---------------------------------------------------------------------------
 
 (def block-header-size 80)
+(def max-headers-per-message 2000)
+(def max-protocol-payload-bytes 4000000)
 
 (defn encode-block-header
   "{:version :prev-block :merkle-root :timestamp :bits :nonce} -> the
@@ -389,6 +390,11 @@
   over block-hash's natural-order digest."
   [header-bytes]
   (sha256d/bytes->hex-reversed (block-hash header-bytes)))
+
+(defn natural-hash->hex
+  "Natural/on-wire 32-byte hash to conventional display-order hex."
+  [hash-natural-bytes]
+  (sha256d/bytes->hex-reversed hash-natural-bytes))
 
 (defn decode-block-header
   "Exactly 80 bytes -> {:version :prev-block :merkle-root :timestamp
@@ -433,18 +439,32 @@
   docstring)."
   [bs]
   (let [[n offset] (decode-varint bs 0)]
+    (when (> n max-headers-per-message)
+      (throw (ex-info "Bitcoin headers message exceeds the protocol limit."
+                      {:type :bitcoin/too-many-headers :count n})))
     (loop [i 0 offset offset acc []]
       (if (= i n)
-        acc
-        (let [header-bytes (subvec bs offset (+ offset block-header-size))
-              [_txn-count offset'] (decode-varint bs (+ offset block-header-size))]
+        (do
+          (when-not (= offset (count bs))
+            (throw (ex-info "Bitcoin headers message has trailing data."
+                            {:type :bitcoin/malformed-headers})))
+          acc)
+        (let [header-end (+ offset block-header-size)
+              _ (when (> header-end (count bs))
+                  (throw (ex-info "Bitcoin headers message is truncated."
+                                  {:type :bitcoin/malformed-headers})))
+              header-bytes (subvec bs offset header-end)
+              [txn-count offset'] (decode-varint bs header-end)
+              _ (when-not (zero? txn-count)
+                  (throw
+                   (ex-info "Bitcoin headers entry has a non-zero tx count."
+                            {:type :bitcoin/malformed-headers
+                             :transaction-count txn-count})))]
           (recur (inc i) offset' (conj acc (decode-block-header header-bytes))))))))
 
 ;; ---------------------------------------------------------------------------
-;; SPV-level validation: proof-of-work target check + chain linkage.
-;; Deliberately NOT full consensus: no difficulty-retarget-schedule check,
-;; no timestamp-median rule, no checkpoint/genesis-identity check, no
-;; script/transaction validation of any kind -- see namespace docstring.
+;; Header-consensus validation. This remains a headers-only client: it does
+;; not validate transactions, Merkle-root contents, Script, or UTXO state.
 ;; ---------------------------------------------------------------------------
 
 (defn bits->target-bytes
@@ -488,6 +508,281 @@
       0
       (let [ai (nth a i) bi (nth b i)]
         (cond (< ai bi) -1 (> ai bi) 1 :else (recur (inc i)))))))
+
+(defn- trim-leading-zeroes [bs]
+  (let [trimmed (drop-while zero? bs)]
+    (vec (if (seq trimmed) trimmed [0]))))
+
+(defn target-bytes->bits
+  "Encode a 32-byte unsigned target using Bitcoin's canonical compact form."
+  [target]
+  (let [significant (trim-leading-zeroes target)
+        size (if (= significant [0]) 0 (count significant))
+        compact
+        (if (<= size 3)
+          (* (bytes->uint-le (reverse significant))
+             (reduce * 1 (repeat (- 3 size) 256)))
+          (+ (* (nth significant 0) 65536)
+             (* (nth significant 1) 256)
+             (nth significant 2)))
+        [size compact]
+        (if (not (zero? (bit-and compact 0x00800000)))
+          [(inc size) (quot compact 256)]
+          [size compact])]
+    (+ (* size 0x1000000) compact)))
+
+(defn- multiply-be-small [bs multiplier]
+  (loop [remaining (reverse bs) carry 0 result ()]
+    (if-let [values (seq remaining)]
+      (let [product (+ (* (first values) multiplier) carry)]
+        (recur (rest values) (quot product 256)
+               (conj result (mod product 256))))
+      (let [prefix
+            (loop [value carry prefix ()]
+              (if (zero? value)
+                prefix
+                (recur (quot value 256) (conj prefix (mod value 256)))))]
+        (vec (concat prefix result))))))
+
+(defn- divide-be-small [bs divisor]
+  (first
+   (reduce
+    (fn [[result remainder] byte]
+      (let [value (+ (* remainder 256) byte)]
+        [(conj result (quot value divisor)) (mod value divisor)]))
+    [[] 0] bs)))
+
+(defn- pad-target [bs]
+  (let [trimmed (trim-leading-zeroes bs)]
+    (vec (concat (repeat (max 0 (- 32 (count trimmed))) 0)
+                 (take-last 32 trimmed)))))
+
+(defn- add-one-be [bs]
+  (loop [i (dec (count bs)) result (vec bs) carry 1]
+    (if (or (neg? i) (zero? carry))
+      result
+      (let [value (+ (nth result i) carry)]
+        (recur (dec i) (assoc result i (mod value 256))
+               (quot value 256))))))
+
+(defn- subtract-be [a b]
+  (loop [i (dec (count a)) result (vec a) borrow 0]
+    (if (neg? i)
+      result
+      (let [difference (- (nth result i) (nth b i) borrow)
+            borrowed? (neg? difference)]
+        (recur (dec i)
+               (assoc result i (if borrowed? (+ difference 256) difference))
+               (if borrowed? 1 0))))))
+
+(defn- shift-left-bit [bs bit]
+  (loop [i (dec (count bs)) result (vec bs) carry bit]
+    (if (neg? i)
+      result
+      (let [value (+ (* 2 (nth result i)) carry)]
+        (recur (dec i) (assoc result i (mod value 256))
+               (quot value 256))))))
+
+(defn- divide-be
+  "Unsigned 256-bit long division. Returns the 32-byte quotient."
+  [numerator denominator]
+  (let [denominator (into [0] denominator)]
+    (loop [bit-index 0 remainder (vec (repeat 33 0))
+           quotient (vec (repeat 32 0))]
+      (if (= bit-index 256)
+        quotient
+        (let [byte-index (quot bit-index 8)
+              bit-offset (- 7 (mod bit-index 8))
+              bit (bit-and 1
+                           (unsigned-bit-shift-right
+                            (nth numerator byte-index) bit-offset))
+              shifted (shift-left-bit remainder bit)
+              subtract? (not (neg? (compare-be shifted denominator)))
+              remainder' (if subtract?
+                           (subtract-be shifted denominator)
+                           shifted)
+              quotient' (if subtract?
+                          (update quotient byte-index
+                                  bit-or
+                                  (bit-shift-left 1 bit-offset))
+                          quotient)]
+          (recur (inc bit-index) remainder' quotient'))))))
+
+(defn add-chainwork
+  "Exact addition of two unsigned 256-bit chainwork values."
+  [left right]
+  (loop [i 31 result (vec (repeat 32 0)) carry 0]
+    (if (neg? i)
+      result
+      (let [sum (+ (nth left i) (nth right i) carry)]
+        (recur (dec i) (assoc result i (mod sum 256)) (quot sum 256))))))
+
+(defn header-work
+  "Exact Bitcoin block proof: floor((2^256-1-target)/(target+1))+1."
+  [bits]
+  (let [target (bits->target-bytes bits)
+        denominator (add-one-be target)
+        numerator (mapv #(- 255 %) target)]
+    (add-one-be (divide-be numerator denominator))))
+
+(def zero-chainwork (vec (repeat 32 0)))
+
+(defn accumulate-chainwork
+  "Add the exact proof represented by every compact target in `bits-values`."
+  ([bits-values] (accumulate-chainwork zero-chainwork bits-values))
+  ([initial bits-values]
+   (first
+    (reduce
+     (fn [[total work-cache] bits]
+       (let [work (or (get work-cache bits) (header-work bits))]
+         [(add-chainwork total work) (assoc work-cache bits work)]))
+     [initial {}] bits-values))))
+
+(defn better-chain?
+  "Fork-choice primitive: true only when candidate cumulative work is larger."
+  [candidate-chainwork current-chainwork]
+  (pos? (compare-be candidate-chainwork current-chainwork)))
+
+(def network-parameters
+  {:mainnet {:pow-limit-bits 0x1d00ffff
+             :target-timespan 1209600 :target-spacing 600
+             :allow-min-difficulty? false}
+   :testnet {:pow-limit-bits 0x1d00ffff
+             :target-timespan 1209600 :target-spacing 600
+             :allow-min-difficulty? true}})
+
+(declare hash-meets-target? header-links-to?)
+
+(defn- target-valid-for-network? [network bits]
+  (let [target (bits->target-bytes bits)
+        limit (bits->target-bytes
+               (get-in network-parameters [network :pow-limit-bits]))]
+    (and (not (every? zero? target))
+         (not (pos? (compare-be target limit))))))
+
+(defn- retarget-bits [network previous epoch-first]
+  (let [{:keys [pow-limit-bits target-timespan]} (network-parameters network)
+        actual (- (:timestamp previous) (:timestamp epoch-first))
+        bounded (max (quot target-timespan 4)
+                     (min actual (* target-timespan 4)))
+        recalculated
+        (-> (bits->target-bytes (:bits previous))
+            (multiply-be-small bounded)
+            (divide-be-small target-timespan)
+            pad-target)
+        limit (bits->target-bytes pow-limit-bits)]
+    (target-bytes->bits
+     (if (pos? (compare-be recalculated limit)) limit recalculated))))
+
+(defn- expected-bits
+  [headers start-height index network]
+  (let [{:keys [pow-limit-bits target-timespan target-spacing
+                allow-min-difficulty?]}
+        (network-parameters network)
+        interval (quot target-timespan target-spacing)
+        height (+ start-height index)
+        previous (nth headers (dec index))]
+    (cond
+      (zero? (mod height interval))
+      (let [epoch-height (- height interval)
+            epoch-index (- epoch-height start-height)]
+        (when (<= 0 epoch-index)
+          (retarget-bits network previous (nth headers epoch-index))))
+
+      (and allow-min-difficulty?
+           (> (:timestamp (nth headers index))
+              (+ (:timestamp previous) (* 2 target-spacing))))
+      pow-limit-bits
+
+      allow-min-difficulty?
+      (loop [cursor (dec index)
+             cursor-height (dec height)]
+        (let [header (nth headers cursor)]
+          (if (and (pos? (mod cursor-height interval))
+                   (= pow-limit-bits (:bits header)))
+            (when (pos? cursor)
+              (recur (dec cursor) (dec cursor-height)))
+            (:bits header))))
+
+      :else (:bits previous))))
+
+(defn median-time-past
+  "Median timestamp of at most the preceding 11 headers."
+  [headers index]
+  (let [timestamps (sort (map :timestamp
+                              (subvec headers (max 0 (- index 11)) index)))]
+    (when (seq timestamps)
+      (nth timestamps (quot (count timestamps) 2)))))
+
+(defn validate-header-consensus
+  "Contextual headers-only consensus checks.
+
+  `headers` must contain chronological ancestor context followed by candidate
+  headers. `start-height` is the height of headers[0], and
+  `validate-from-index` identifies the first untrusted candidate. Difficulty
+  transitions, testnet minimum-difficulty recovery, median-time-past, future
+  time, linkage, target range, and proof of work are checked. This does not
+  validate transactions, Merkle roots, Script, or UTXO state."
+  [headers {:keys [network start-height validate-from-index now]
+            :or {start-height 0 validate-from-index 0}}]
+  (when-not (contains? network-parameters network)
+    (throw (ex-info "Unsupported Bitcoin network."
+                    {:type :bitcoin/unsupported-network :network network})))
+  (let [headers (vec headers)
+        errors
+        (vec
+         (mapcat
+          (fn [index]
+            (let [header (nth headers index)
+                  height (+ start-height index)
+                  interval
+                  (quot (get-in network-parameters
+                                [network :target-timespan])
+                        (get-in network-parameters
+                                [network :target-spacing]))
+                  expected (when (pos? index)
+                             (expected-bits headers start-height index network))
+                  mtp (median-time-past headers index)]
+              (cond-> []
+                (not (target-valid-for-network? network (:bits header)))
+                (conj {:index index :type :invalid-target
+                       :header-hash-hex (:hash-hex header)})
+
+                (not (hash-meets-target? (:hash header) (:bits header)))
+                (conj {:index index :type :insufficient-work
+                       :header-hash-hex (:hash-hex header)})
+
+                (and (pos? index)
+                     (not (header-links-to? header (nth headers (dec index)))))
+                (conj {:index index :type :broken-linkage
+                       :header-hash-hex (:hash-hex header)})
+
+                (and expected (not= expected (:bits header)))
+                (conj {:index index :type :unexpected-difficulty
+                       :expected expected :actual (:bits header)
+                       :header-hash-hex (:hash-hex header)})
+
+                (and (pos? index)
+                     (nil? expected)
+                     (or (zero? (mod height interval))
+                         (get-in network-parameters
+                                 [network :allow-min-difficulty?])))
+                (conj {:index index :type
+                       :insufficient-difficulty-context
+                       :height height
+                       :header-hash-hex (:hash-hex header)})
+
+                (and mtp (<= (:timestamp header) mtp))
+                (conj {:index index :type :time-too-old
+                       :median-time-past mtp
+                       :header-hash-hex (:hash-hex header)})
+
+                (and now (> (:timestamp header) (+ now 7200)))
+                (conj {:index index :type :time-too-new
+                       :now now :header-hash-hex (:hash-hex header)}))))
+          (range validate-from-index (count headers))))]
+    {:valid? (empty? errors)
+     :errors errors}))
 
 (defn hash-meets-target?
   "true iff a header's own hash (NATURAL byte order, as decode-block-
