@@ -396,17 +396,37 @@
   [header-bytes]
   (digest-bytes header-bytes))
 
+(defn- natural-bytes->display-hex [bytes]
+  #?(:clj
+     (let [length (count bytes)
+           ^String digits "0123456789abcdef"
+           result (char-array (* 2 length))]
+       (loop [source (dec length)
+              destination 0]
+         (if (neg? source)
+           (String. result)
+           (let [value (bit-and 0xff (nth bytes source))]
+             (aset-char result destination
+                        (.charAt digits
+                                 (bit-shift-right value 4)))
+             (aset-char result (inc destination)
+                        (.charAt digits
+                                 (bit-and value 0x0f)))
+             (recur (dec source) (+ destination 2))))))
+     :cljs
+     (sha256d/bytes->hex-reversed bytes)))
+
 (defn block-hash-hex
   "Conventional big-endian display hex of an 80-byte header's hash (the
   form block explorers / RPC show) -- sha256d.core/bytes->hex-reversed
   over block-hash's natural-order digest."
   [header-bytes]
-  (sha256d/bytes->hex-reversed (block-hash header-bytes)))
+  (natural-bytes->display-hex (block-hash header-bytes)))
 
 (defn natural-hash->hex
   "Natural/on-wire 32-byte hash to conventional display-order hex."
   [hash-natural-bytes]
-  (sha256d/bytes->hex-reversed hash-natural-bytes))
+  (natural-bytes->display-hex hash-natural-bytes))
 
 (defn decode-block-header
   "Exactly 80 bytes -> {:version :prev-block :merkle-root :timestamp
@@ -417,15 +437,16 @@
   validation function below depends on."
   [bs]
   {:pre [(= block-header-size (count bs))]}
-  (let [bs (vec bs)]
+  (let [bs (vec bs)
+        hash (block-hash bs)]
     {:version     (bytes->int32-le (subvec bs 0 4))
      :prev-block  (vec (subvec bs 4 36))
      :merkle-root (vec (subvec bs 36 68))
      :timestamp   (bytes->uint-le (subvec bs 68 72))
      :bits        (bytes->uint-le (subvec bs 72 76))
      :nonce       (bytes->uint-le (subvec bs 76 80))
-     :hash        (block-hash bs)
-     :hash-hex    (block-hash-hex bs)
+     :hash        hash
+     :hash-hex    (natural-bytes->display-hex hash)
      :bytes       bs}))
 
 ;; ---------------------------------------------------------------------------

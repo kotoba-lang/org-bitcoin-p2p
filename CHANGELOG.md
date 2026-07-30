@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1 — 2026-07-30
+
+- Compute each decoded block-header hash once instead of repeating SHA-256d.
+- Encode JVM display-order hashes directly into a fixed `char[]`, avoiding
+  reflective and lazy-sequence allocation during mainnet-scale header loads.
+
 ## 0.5.0 — 2026-07-30
 
 - Use the JDK SHA-256 provider for JVM message checksums and block hashes while
