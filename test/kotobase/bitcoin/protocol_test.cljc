@@ -143,6 +143,12 @@
   (is (= (first fx/testnet-header-hash-hex) (:hash-hex proto/testnet-genesis-header)))
   (is (= proto/mainnet-genesis-header (proto/genesis-header :mainnet)))
   (is (= proto/testnet-genesis-header (proto/genesis-header :testnet)))
+  (is (= "00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043"
+         (:hash-hex proto/testnet4-genesis-header)))
+  (is (= "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6"
+         (:hash-hex proto/signet-genesis-header)))
+  (is (= proto/testnet4-genesis-header (proto/genesis-header :testnet4)))
+  (is (= proto/signet-genesis-header (proto/genesis-header :signet)))
   (is (= "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
          (:hash-hex proto/regtest-genesis-header)))
   (is (= proto/regtest-genesis-header (proto/genesis-header :regtest))))
@@ -303,6 +309,29 @@
          headers {:network :testnet :start-height 1
                   :validate-from-index 1 :now 10000})]
     (is (:valid? result) (pr-str (:errors result)))))
+
+(deftest testnet4-bip94-retargets-from-the-periods-first-real-target
+  (let [harder 0x1c00ffff
+        context
+        (vec
+         (concat
+          [(synthetic-header 0 harder)]
+          (map #(synthetic-header (* % 600) 0x1d00ffff)
+               (range 1 2017))))
+        rejected
+        (proto/validate-header-consensus
+         context {:network :testnet4 :start-height 0
+                  :validate-from-index 2016})
+        expected (->> (:errors rejected)
+                      (filter #(= :unexpected-difficulty (:type %)))
+                      first :expected)
+        corrected (assoc-in context [2016 :bits] expected)
+        accepted
+        (proto/validate-header-consensus
+         corrected {:network :testnet4 :start-height 0
+                    :validate-from-index 2016})]
+    (is (= 0x1c00ffde expected))
+    (is (:valid? accepted) (pr-str (:errors accepted)))))
 
 (deftest contextual-difficulty-fails-closed-without-required-ancestors
   (let [mainnet

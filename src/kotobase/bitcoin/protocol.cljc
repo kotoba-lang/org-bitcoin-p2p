@@ -650,6 +650,13 @@
    :testnet {:pow-limit-bits 0x1d00ffff
              :target-timespan 1209600 :target-spacing 600
              :allow-min-difficulty? true}
+   :testnet4 {:pow-limit-bits 0x1d00ffff
+              :target-timespan 1209600 :target-spacing 600
+              :allow-min-difficulty? true
+              :enforce-bip94? true}
+   :signet {:pow-limit-bits 0x1e0377ae
+            :target-timespan 1209600 :target-spacing 600
+            :allow-min-difficulty? false}
    :regtest {:pow-limit-bits 0x207fffff
              :target-timespan 1209600 :target-spacing 600
              :allow-min-difficulty? true
@@ -669,8 +676,12 @@
         actual (- (:timestamp previous) (:timestamp epoch-first))
         bounded (max (quot target-timespan 4)
                      (min actual (* target-timespan 4)))
+        base-bits
+        (if (get-in network-parameters [network :enforce-bip94?])
+          (:bits epoch-first)
+          (:bits previous))
         recalculated
-        (-> (bits->target-bytes (:bits previous))
+        (-> (bits->target-bytes base-bits)
             (multiply-be-small bounded)
             (divide-be-small target-timespan)
             pad-target)
@@ -865,15 +876,26 @@
 (def regtest-genesis-header-hex
   "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f2002000000")
 
+(def testnet4-genesis-header-hex
+  "0100000000000000000000000000000000000000000000000000000000000000000000004e7b2b9128fe0291db0693af2ae418b767e657cd407e80cb1434221eaea7a07a046f3566ffff001dbb0c7817")
+
+(def signet-genesis-header-hex
+  "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a008f4d5fae77031e8ad22203")
+
 (def mainnet-genesis-header (decode-block-header (hex->bytes mainnet-genesis-header-hex)))
 (def testnet-genesis-header (decode-block-header (hex->bytes testnet-genesis-header-hex)))
 (def regtest-genesis-header (decode-block-header (hex->bytes regtest-genesis-header-hex)))
+(def testnet4-genesis-header
+  (decode-block-header (hex->bytes testnet4-genesis-header-hex)))
+(def signet-genesis-header
+  (decode-block-header (hex->bytes signet-genesis-header-hex)))
 
 (defn genesis-header
-  "mainnet-genesis-header or testnet-genesis-header for `network`
-  (:mainnet | :testnet | :regtest)."
+  "Return the hard-coded genesis trust anchor for a supported network."
   [network]
   (case network
     :mainnet mainnet-genesis-header
     :testnet testnet-genesis-header
+    :testnet4 testnet4-genesis-header
+    :signet signet-genesis-header
     :regtest regtest-genesis-header))

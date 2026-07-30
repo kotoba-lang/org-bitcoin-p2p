@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0 — 2026-07-30
+
+- Add Bitcoin Core v31.1 testnet4 and default signet proof-of-work parameters
+  and hard-coded genesis trust anchors.
+- Implement BIP94 testnet4 retargeting from the first block of each difficulty
+  period while preserving the minimum-difficulty exception between periods.
+
 ## 0.3.0 — 2026-07-30
 
 - Add Bitcoin Core-compatible regtest genesis, magic, port, proof limit, and
