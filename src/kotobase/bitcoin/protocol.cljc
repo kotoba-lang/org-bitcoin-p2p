@@ -30,7 +30,18 @@
   network exercise of this code stays unambiguously in \"protocol
   implementation\" territory (ADR-2607172600)."
   (:require [clojure.string :as str]
-            [sha256d.core :as sha256d]))
+            [sha256d.core :as sha256d])
+  #?(:clj (:import [java.security MessageDigest])))
+
+(defn- digest-bytes [bytes]
+  #?(:clj
+     (let [input (byte-array (map unchecked-byte bytes))
+           first-pass (.digest (MessageDigest/getInstance "SHA-256") input)
+           second-pass (.digest (MessageDigest/getInstance "SHA-256")
+                                first-pass)]
+       (mapv #(bit-and 0xff %) second-pass))
+     :cljs
+     (vec (sha256d/sha256d-bytes bytes))))
 
 ;; ---------------------------------------------------------------------------
 ;; Network magic bytes (first 4 bytes of every message header)
@@ -191,7 +202,7 @@
 (defn checksum
   "First 4 bytes of sha256d(payload) -- the message-header checksum field."
   [payload-bytes]
-  (vec (take 4 (sha256d/sha256d-bytes payload-bytes))))
+  (vec (take 4 (digest-bytes payload-bytes))))
 
 (defn encode-message
   "magic (4-byte vector) + command (string) + payload (byte vector) ->
@@ -383,7 +394,7 @@
   human-displayed order (see sha256d.core/bytes->hex-reversed / this
   namespace's block-hash-hex for that)."
   [header-bytes]
-  (vec (sha256d/sha256d-bytes header-bytes)))
+  (digest-bytes header-bytes))
 
 (defn block-hash-hex
   "Conventional big-endian display hex of an 80-byte header's hash (the

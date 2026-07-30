@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.0 — 2026-07-30
+
+- Use the JDK SHA-256 provider for JVM message checksums and block hashes while
+  retaining the portable ClojureScript implementation and identical bytes.
+
 ## 0.4.1 — 2026-07-30
 
 - Decode the full unsigned 64-bit range on the JVM without signed-long
