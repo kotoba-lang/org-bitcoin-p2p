@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.2 — 2026-07-31
+
+- Match Bitcoin Core's exact `SetCompact` negative and overflow boundaries.
+- Accept exponent 33/34 compact targets when leading mantissa bytes keep the
+  decoded target within 256 bits, while continuing to reject true overflow.
+
 ## 0.5.1 — 2026-07-30
 
 - Compute each decoded block-header hash once instead of repeating SHA-256d.

@@ -58,7 +58,8 @@ Two layers, same split every repo in this project uses:
   timestamp, bits, nonce) with the hash **always computed from the actual
   bytes** (`sha256d`, never trusted from an external claim) -- the
   load-bearing trustless property every validation function depends on.
-- `bits->target-bytes` / `hash-meets-target?` -- real compact-target
+- `bits->target-bytes` / `hash-meets-target?` -- Core `SetCompact`-compatible
+  compact-target decoding, including exponent 33/34 overflow boundaries
   decoding and proof-of-work verification, done as big-endian
   **byte-vector comparison** rather than arbitrary-precision integer
   arithmetic (fully portable JVM clj + cljs without a bigint dependency;

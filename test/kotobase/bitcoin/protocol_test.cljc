@@ -207,6 +207,20 @@
     (is (= bits
            (proto/target-bytes->bits (proto/bits->target-bytes bits))))))
 
+(deftest compact-target-matches-core-setcompact-overflow-boundaries
+  (is (= (proto/bits->target-bytes 0x1f7f0000)
+         (proto/bits->target-bytes 0x2100007f))
+      "exponent 33 is valid when two leading mantissa bytes are zero")
+  (is (= (proto/bits->target-bytes 0x207f0000)
+         (proto/bits->target-bytes 0x2200007f))
+      "exponent 34 is valid when the mantissa fits one byte")
+  (doseq [overflow [0x23000001 0x22000100 0x21010000]]
+    (is (= (vec (repeat 32 0))
+           (proto/bits->target-bytes overflow))))
+  (is (= (vec (repeat 32 0))
+         (proto/bits->target-bytes 0x2280007f))
+      "negative compact targets remain invalid"))
+
 (deftest chainwork-is-exact-and-selects-only-the-more-work-chain
   (let [one-block (proto/header-work 0x1d00ffff)
         two-blocks (proto/accumulate-chainwork [0x1d00ffff 0x1d00ffff])]

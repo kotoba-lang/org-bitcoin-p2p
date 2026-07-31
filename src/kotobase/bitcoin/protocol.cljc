@@ -505,11 +505,14 @@
   (4-byte uint32, already reassembled from its LE wire bytes) claims.
   Standard Bitcoin compact-target decoding: top byte is an exponent (the
   target's byte-length), low 3 bytes are the mantissa;
-  target = mantissa * 256^(exponent-3). The 0x00800000 sign bit marks a
-  degenerate \"negative\" target real consensus rules always reject --
-  this returns 32 zero bytes for that case (an all-zero target no real
-  32-byte hash can ever be <=, so hash-meets-target? correctly always
-  fails it, without a separate error path). No arbitrary-precision
+  target = mantissa * 256^(exponent-3). Core permits non-canonical exponent
+  33/34 encodings when leading mantissa bytes keep the result within 256 bits;
+  its exact `SetCompact` overflow predicate is applied before leading-zero
+  normalization. The 0x00800000 sign bit marks a degenerate \"negative\"
+  target real consensus rules always reject -- this returns 32 zero bytes for
+  negative, zero, or overflowing targets (an all-zero target no real 32-byte
+  hash can ever be <=, so hash-meets-target? correctly always fails it,
+  without a separate error path). No arbitrary-precision
   integer type is used anywhere in this namespace: representing the
   target as a big-endian BYTE VECTOR and comparing lexicographically
   (compare-be, below) is exact and fully portable (JVM clj + cljs) without
@@ -518,19 +521,22 @@
   (let [exponent (bit-and (unsigned-bit-shift-right bits 24) 0xff)
         mantissa (bit-and bits 0x007fffff)
         negative? (not (zero? (bit-and bits 0x00800000)))
+        overflow?
+        (and (not (zero? mantissa))
+             (or (> exponent 34)
+                 (and (> mantissa 0xff) (> exponent 33))
+                 (and (> mantissa 0xffff) (> exponent 32))))
         m-bytes [(bit-and (unsigned-bit-shift-right mantissa 16) 0xff)
                  (bit-and (unsigned-bit-shift-right mantissa 8) 0xff)
-                 (bit-and mantissa 0xff)]]
-    (vec
-     (cond
-       (or negative? (zero? mantissa) (> exponent 32))
-       (repeat 32 0)
-
-       (>= exponent 3)
-       (concat (repeat (- 32 exponent) 0) m-bytes (repeat (- exponent 3) 0))
-
-       :else
-       (concat (repeat (- 32 exponent) 0) (take exponent m-bytes))))))
+                 (bit-and mantissa 0xff)]
+        raw
+        (if (>= exponent 3)
+          (concat m-bytes (repeat (- exponent 3) 0))
+          (take exponent m-bytes))
+        significant (vec (drop-while zero? raw))]
+    (if (or negative? (zero? mantissa) overflow? (empty? significant))
+      (vec (repeat 32 0))
+      (vec (concat (repeat (- 32 (count significant)) 0) significant)))))
 
 (defn- compare-be
   "Lexicographic compare of two equal-length big-endian byte vectors, as
