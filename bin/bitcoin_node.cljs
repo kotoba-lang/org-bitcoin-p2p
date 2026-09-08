@@ -13,7 +13,7 @@
 ;; PERMANENT SAFETY BOUNDARY excludes (see kotobase.bitcoin.protocol's
 ;; namespace docstring) -- read-only header observation only.
 (ns bitcoin-node
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [promesa.core :as p]
             [kotobase.bitcoin.transport :as tp]
             [kotobase.local :as local]))
