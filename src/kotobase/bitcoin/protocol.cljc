@@ -29,7 +29,7 @@
   explicit, opt-in configuration value, never a default, so any live-
   network exercise of this code stays unambiguously in \"protocol
   implementation\" territory (ADR-2607172600)."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [sha256d.core :as sha256d])
   #?(:clj (:import [java.security MessageDigest])))
 
