@@ -47,7 +47,7 @@
 ;; line, and exits 0 iff all 6 passed (else 1). Run from this repo's
 ;; root:
 ;;
-;;   nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" \
+;;   kbb --backend sci --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" \
 ;;     test/kotobase/bitcoin/transport_demo.cljk
 
 (ns kotobase.bitcoin.transport-demo

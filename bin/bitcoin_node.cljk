@@ -3,7 +3,7 @@
 ;; general-purpose Bitcoin client CLI, just a thin driver over
 ;; kotobase.bitcoin.transport for exploring a real connection by hand.
 ;;
-;;   nbb --classpath "src:.deps/kotobase/src:.deps/sha256d/src" \
+;;   kbb --backend sci --classpath "src:.deps/kotobase/src:.deps/sha256d/src" \
 ;;     bin/bitcoin_node.cljk sync --host <ip> [--port 18333] [--network testnet]
 ;;
 ;; Connects, performs the real handshake, pings once, requests one batch
