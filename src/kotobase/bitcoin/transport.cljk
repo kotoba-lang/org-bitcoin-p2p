@@ -5,7 +5,7 @@
   bundles), matching the `kotoba-lang/dtn` / `kotoba-lang/io-libp2p` /
   `kotoba-lang/org-ietf-sftp` transport-layer precedent (ADR-2607161817 /
   ADR-2607162135 in `com-junkawasaki/root`). `.cljs`-only: this can never
-  be loaded by the JVM `clojure -M:test` compat suite (see this repo's
+  be loaded by the JVM `kbb -M:test` compat suite (see this repo's
   deps.edn), so it can never regress `kotobase.bitcoin.protocol`'s pure
   `.cljc` test suite.
 

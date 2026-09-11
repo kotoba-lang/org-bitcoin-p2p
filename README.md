@@ -113,7 +113,7 @@ Real TCP (`node:net`, zero npm dependencies besides `promesa`, which nbb
 bundles) -- matching the `kotoba-lang/dtn` / `kotoba-lang/io-libp2p` /
 `kotoba-lang/org-ietf-sftp` transport-layer precedent
 (ADR-2607161817 / ADR-2607162135). `.cljs`-only means it can never be
-loaded by the JVM `clojure -M:test` compat suite, so it can never regress
+loaded by the JVM `kbb -M:test` compat suite, so it can never regress
 `kotobase.bitcoin.protocol`'s pure test suite.
 
 ```clojure
@@ -213,16 +213,16 @@ git clone https://github.com/kotoba-lang/sha256d .deps/sha256d
 
 # Pure .cljc core -- real headers, PoW, difficulty/MTP, chainwork,
 # linkage, strict message decoding.
-nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" bin/run_tests.cljk
+kbb --backend sci --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" bin/run_tests.cljk
 
 # Deterministic real-socket demo (local fake peer, no live network needed)
-nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" test/kotobase/bitcoin/transport_demo.cljk
+kbb --backend sci --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" test/kotobase/bitcoin/transport_demo.cljk
 
 # BEST-EFFORT live testnet demo (real internet, real peer, non-deterministic)
-nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" test/kotobase/bitcoin/testnet_live_demo.cljk
+kbb --backend sci --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" test/kotobase/bitcoin/testnet_live_demo.cljk
 
 # Manual one-shot sync against a real peer
-nbb --classpath "src:.deps/kotobase/src:.deps/sha256d/src" bin/bitcoin_node.cljk sync --host <ip> [--port 18333] [--network testnet]
+kbb --backend sci --classpath "src:.deps/kotobase/src:.deps/sha256d/src" bin/bitcoin_node.cljk sync --host <ip> [--port 18333] [--network testnet]
 ```
 
 The `:test` alias in `deps.edn` is the JVM **compat** suite for the pure
@@ -231,9 +231,9 @@ under `src/kotobase/bitcoin/transport.cljk` (`.cljs`-only, `node:net`,
 cannot run on the JVM at all):
 
 ```bash
-clojure -M:test
-clojure -M:lint
-clojure -M:coverage
+kbb -M:test
+kbb -M:lint
+kbb -M:coverage
 ```
 
 ## License

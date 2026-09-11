@@ -44,7 +44,7 @@
 ;; an honest explanation (never claims success it didn't observe). Run
 ;; from this repo's root:
 ;;
-;;   nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" \
+;;   kbb --backend sci --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" \
 ;;     test/kotobase/bitcoin/testnet_live_demo.cljk
 
 (ns kotobase.bitcoin.testnet-live-demo
