@@ -86,7 +86,7 @@ handling, peer discovery, or multi-peer fork orchestration.
 
 ### Real test fixtures
 
-`test/kotobase/bitcoin/fixtures.cljc` hardcodes the first 4 real headers
+`test/kotobase/bitcoin/fixtures.cljk` hardcodes the first 4 real headers
 (genesis + 3) of both Bitcoin mainnet and testnet3, fetched from
 [blockstream.info](https://blockstream.info)'s public block-explorer REST
 API on 2026-07-17 and independently cross-checked in that session: each
@@ -94,7 +94,7 @@ header's own `sha256d`, byte-reversed, was recomputed with plain `openssl
 dgst -sha256` chained twice and confirmed byte-for-byte equal to the
 well-known display hash before being hardcoded -- not copied from memory.
 
-`test/kotobase/bitcoin/protocol_test.cljc` proves, against this real data:
+`test/kotobase/bitcoin/protocol_test.cljk` proves, against this real data:
 
 - every real fixture header's hash matches the known value and satisfies
   its own claimed proof-of-work target
@@ -181,10 +181,10 @@ verack handshake and ping/pong completed but the peer did not reply to
 `getheaders` within a generous timeout (likely rate-limiting/
 deprioritizing a rapidly-reconnecting source IP during repeated manual
 testing) -- a real, observed remote-peer behavior, not a bug in this
-repo's own logic. `test/kotobase/bitcoin/transport_demo.cljs` proves
+repo's own logic. `test/kotobase/bitcoin/transport_demo.cljk` proves
 `get-headers!`'s own timeout path resolves correctly (does not hang) via
 a deterministic local fake peer that withholds its reply on purpose.
-`test/kotobase/bitcoin/testnet_live_demo.cljs` (the live version) is
+`test/kotobase/bitcoin/testnet_live_demo.cljk` (the live version) is
 **best-effort and non-blocking in CI** for exactly this reason -- it tries
 several peer IPs in turn and is honest in its own output about exactly
 which step succeeded or failed for each one; a failure there means "no
@@ -213,21 +213,21 @@ git clone https://github.com/kotoba-lang/sha256d .deps/sha256d
 
 # Pure .cljc core -- real headers, PoW, difficulty/MTP, chainwork,
 # linkage, strict message decoding.
-nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" bin/run_tests.cljs
+nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" bin/run_tests.cljk
 
 # Deterministic real-socket demo (local fake peer, no live network needed)
-nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" test/kotobase/bitcoin/transport_demo.cljs
+nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" test/kotobase/bitcoin/transport_demo.cljk
 
 # BEST-EFFORT live testnet demo (real internet, real peer, non-deterministic)
-nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" test/kotobase/bitcoin/testnet_live_demo.cljs
+nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" test/kotobase/bitcoin/testnet_live_demo.cljk
 
 # Manual one-shot sync against a real peer
-nbb --classpath "src:.deps/kotobase/src:.deps/sha256d/src" bin/bitcoin_node.cljs sync --host <ip> [--port 18333] [--network testnet]
+nbb --classpath "src:.deps/kotobase/src:.deps/sha256d/src" bin/bitcoin_node.cljk sync --host <ip> [--port 18333] [--network testnet]
 ```
 
 The `:test` alias in `deps.edn` is the JVM **compat** suite for the pure
 `.cljc` core (`kotobase.bitcoin.protocol`) only -- it never loads anything
-under `src/kotobase/bitcoin/transport.cljs` (`.cljs`-only, `node:net`,
+under `src/kotobase/bitcoin/transport.cljk` (`.cljs`-only, `node:net`,
 cannot run on the JVM at all):
 
 ```bash

@@ -16,7 +16,7 @@
 ;; / checksum-tamper rejection / timeout) through a REAL socket, without
 ;; depending on a real remote Bitcoin node's timing or availability --
 ;; this repo's genuine third-party-interop proof is separate (see
-;; test/kotobase/bitcoin/testnet_live_demo.cljs, which speaks this exact
+;; test/kotobase/bitcoin/testnet_live_demo.cljk, which speaks this exact
 ;; client code to a REAL live Bitcoin testnet full node -- strictly
 ;; stronger evidence than a second same-repo process would be, but
 ;; honestly non-deterministic/best-effort since it depends on live
@@ -48,7 +48,7 @@
 ;; root:
 ;;
 ;;   nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" \
-;;     test/kotobase/bitcoin/transport_demo.cljs
+;;     test/kotobase/bitcoin/transport_demo.cljk
 
 (ns kotobase.bitcoin.transport-demo
   (:require ["node:net" :as net]

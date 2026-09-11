@@ -19,10 +19,10 @@
         io.github.kotoba-lang/sha256d
         {:git/sha "5fd4e64d0fc5a616b798edbca7327da33c78eb02"}}
  ;; First-class runtime is nbb/cljs (repo-wide runtime priority):
- ;;   nbb --classpath "src:test:<kotobase>/src:<sha256d>/src" bin/run_tests.cljs
+ ;;   nbb --classpath "src:test:<kotobase>/src:<sha256d>/src" bin/run_tests.cljk
  ;; The :test alias below is the :clj COMPAT suite for the pure `.cljc`
  ;; core (kotobase.bitcoin.protocol) only -- it never loads anything under
- ;; src/kotobase/bitcoin/transport.cljs (.cljs-only, node:net, cannot run
+ ;; src/kotobase/bitcoin/transport.cljk (.cljs-only, node:net, cannot run
  ;; on the JVM at all).
  :aliases
  {:test {:extra-paths ["test"]
