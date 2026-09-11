@@ -4,7 +4,7 @@
 ;; kotobase.bitcoin.transport for exploring a real connection by hand.
 ;;
 ;;   nbb --classpath "src:.deps/kotobase/src:.deps/sha256d/src" \
-;;     bin/bitcoin_node.cljs sync --host <ip> [--port 18333] [--network testnet]
+;;     bin/bitcoin_node.cljk sync --host <ip> [--port 18333] [--network testnet]
 ;;
 ;; Connects, performs the real handshake, pings once, requests one batch
 ;; of headers, validates + persists them into an in-process

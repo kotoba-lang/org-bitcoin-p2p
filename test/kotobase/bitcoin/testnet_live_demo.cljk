@@ -45,7 +45,7 @@
 ;; from this repo's root:
 ;;
 ;;   nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" \
-;;     test/kotobase/bitcoin/testnet_live_demo.cljs
+;;     test/kotobase/bitcoin/testnet_live_demo.cljk
 
 (ns kotobase.bitcoin.testnet-live-demo
   (:require ["node:dns" :as dns]

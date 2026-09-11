@@ -39,7 +39,7 @@ jobs:
       # Pure .cljc core (kotobase.bitcoin.protocol) -- real historical
       # mainnet/testnet header fixtures, proof-of-work + chain-linkage
       # validation, message framing.
-      - run: nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" bin/run_tests.cljs
+      - run: nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" bin/run_tests.cljk
       # Deterministic real-socket demo (.cljs-only transport): a real
       # node:net loopback connection against a local fake peer this repo
       # controls -- handshake, ping/pong, getheaders/headers round-trip
@@ -47,12 +47,12 @@ jobs:
       # behavior, tampered-checksum-message drop. See the file's own
       # docstring for exactly what this proves and why it's in-process
       # rather than a second spawned OS process.
-      - run: nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" test/kotobase/bitcoin/transport_demo.cljs
+      - run: nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" test/kotobase/bitcoin/transport_demo.cljk
       # BEST-EFFORT live testnet demo -- real internet, a real Bitcoin
       # testnet full node, non-deterministic by nature (peer
       # availability/timing this repo doesn't control, and CI runners
       # sometimes restrict arbitrary outbound TCP ports). Never gates CI
       # green/red; see the file's own docstring for exactly what a
       # failure here does and does not mean.
-      - run: nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" test/kotobase/bitcoin/testnet_live_demo.cljs
+      - run: nbb --classpath "src:test:.deps/kotobase/src:.deps/sha256d/src" test/kotobase/bitcoin/testnet_live_demo.cljk
         continue-on-error: true
