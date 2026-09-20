@@ -35,7 +35,7 @@
 ;; everything after it as our own args.
 (let [argv (vec (js->clj (into-array js/process.argv)))
       script-idx (or (first (keep-indexed
-                              (fn [i s] (when (str/ends-with? s "bitcoin_node.cljs") i))
+                              (fn [i s] (when (str/ends-with? s "bitcoin_node.cljk") i))
                               argv))
                       2)
       our-args (subvec argv (inc script-idx))
