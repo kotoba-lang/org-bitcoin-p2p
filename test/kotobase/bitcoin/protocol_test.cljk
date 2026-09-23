@@ -1,5 +1,5 @@
 (ns kotobase.bitcoin.protocol-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotobase.bitcoin.protocol :as proto]
             [kotobase.bitcoin.fixtures :as fx]))
 
