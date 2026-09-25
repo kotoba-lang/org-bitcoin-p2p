@@ -399,6 +399,5 @@
                      (assoc one (dec (count one)) 1)
                      (conj one 0)
                      (vec (butlast (butlast one)))]]
-      (is (thrown? #?(:clj clojure.lang.ExceptionInfo
-                      :cljs js/Error)
+      (is (thrown? js/Error
                    (proto/decode-headers-payload payload))))))
